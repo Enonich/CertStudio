@@ -1,0 +1,5 @@
+pypdf
+reportlab
+pymupdf
+fastapi
+uvicorn

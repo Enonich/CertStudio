@@ -1,0 +1,61 @@
+{
+  "page": 0,
+  "default_font": "Helvetica",
+  "default_size": 18,
+  "fields": [
+    {
+      "name": "date_awarded",
+      "x": 211,
+      "y": 96.66666666666666,
+      "font": "Helvetica",
+      "size": 18,
+      "align": "center",
+      "color": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "certificate_id",
+      "x": 391.66666666666663,
+      "y": 87.33333333333333,
+      "font": "Helvetica",
+      "size": 14,
+      "align": "center",
+      "color": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "full_name",
+      "x": 398.1333325703938,
+      "y": 318.53333346048987,
+      "font": "Helvetica",
+      "size": 45,
+      "align": "center",
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "max_width": 232
+    },
+    {
+      "name": "course_name",
+      "x": 397.13333257039386,
+      "y": 234,
+      "font": "Helvetica",
+      "size": 20,
+      "align": "center",
+      "color": [
+        0,
+        0,
+        0
+      ],
+      "max_width": 199.33333333333331
+    }
+  ]
+}

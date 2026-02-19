@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+date: Tue, 17 Feb 2026 12:36:23 GMT
+server: uvicorn
+content-type: application/pdf
+accept-ranges: bytes
+content-disposition: attachment; filename="certificate.pdf"
+content-length: 1481
+last-modified: Tue, 17 Feb 2026 12:36:24 GMT
+etag: "29705a5c0ff7145eb773c185e74dac30"
+
