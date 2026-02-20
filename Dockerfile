@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY app_server.py certificate_overlay.py extract_template_coords.py ./
+COPY app.py app_server.py certificate_overlay.py extract_template_coords.py ./
 COPY fields.json ./
 COPY fields_store ./fields_store
 COPY fonts ./fonts
@@ -36,4 +36,4 @@ RUN mkdir -p out
 
 EXPOSE 7860
 
-CMD ["sh", "-c", "uvicorn app_server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]

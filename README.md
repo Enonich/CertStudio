@@ -1,9 +1,21 @@
+---
+title: CertStudio Certificate Generator
+emoji: 📄
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: "1.41.1"
+python_version: "3.11"
+app_file: app.py
+pinned: false
+---
+
 # CertStudio Certificate Generator
 
 CertStudio is a certificate layout and generation toolkit with:
 
 - A React visual mapper (`template-mapper-app`) for drawing text and image regions.
-- A FastAPI server (`app_server.py`) that serves the UI and generation APIs.
+- A FastAPI server (`app.py`) that serves the UI and generation APIs.
 - A Python rendering engine (`certificate_overlay.py`) that generates PDF certificates.
 
 It supports single-certificate generation and CSV batch generation (ZIP), custom font upload, rich text, and image overlays.
@@ -11,7 +23,7 @@ It supports single-certificate generation and CSV batch generation (ZIP), custom
 ## Current Architecture
 
 - Frontend: React + Vite (`template-mapper-app`)
-- Backend: FastAPI (`app_server.py`)
+- Backend: FastAPI (`app.py`)
 - PDF engine: ReportLab + pypdf (`certificate_overlay.py`)
 - Optional PDF inspection: PyMuPDF (`extract_template_coords.py` and extraction endpoints)
 
@@ -39,7 +51,7 @@ cd ..
 ### 3) Run server
 
 ```powershell
-uvicorn app_server:app --reload
+uvicorn app:app --reload
 ```
 
 Open: `http://127.0.0.1:8000`
