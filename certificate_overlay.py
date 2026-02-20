@@ -1,4 +1,5 @@
 import argparse
+import base64
 import csv
 import io
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.colors import Color
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -585,7 +587,40 @@ def _decompose_font_style(font_name: str) -> tuple[str, bool, bool]:
         if font_name == "Courier-Oblique":
             return ("Courier", False, True)
         return ("Courier", False, False)
-    return (font_name, False, False)
+    # Best-effort detection for custom fonts that encode style in their names.
+    normalized = _normalize_font_name(font_name)
+    has_bold = "bold" in normalized
+    has_italic = ("italic" in normalized) or ("oblique" in normalized)
+    return (font_name, has_bold, has_italic)
+
+
+def _strip_style_tokens_for_match(font_name: str) -> str:
+    normalized = _normalize_font_name(font_name)
+    normalized = normalized.replace("bolditalic", "")
+    normalized = normalized.replace("boldoblique", "")
+    normalized = normalized.replace("bold", "")
+    normalized = normalized.replace("italic", "")
+    normalized = normalized.replace("oblique", "")
+    return normalized
+
+
+def _resolve_custom_variant_font(base_font_name: str, bold: bool, italic: bool) -> str | None:
+    if not (bold or italic):
+        return None
+    target_base = _strip_style_tokens_for_match(base_font_name)
+    if not target_base:
+        return None
+
+    for candidate in pdfmetrics.getRegisteredFontNames():
+        if not _font_is_available(candidate):
+            continue
+        candidate_base = _strip_style_tokens_for_match(candidate)
+        if candidate_base != target_base:
+            continue
+        _, cand_bold, cand_italic = _decompose_font_style(candidate)
+        if cand_bold == bool(bold) and cand_italic == bool(italic):
+            return candidate
+    return None
 
 
 def apply_emphasis_to_font(
@@ -623,7 +658,12 @@ def apply_emphasis_to_font(
         )
         return resolve_font_name(candidate, fallback_font=fallback_font)
 
-    # For custom fonts, keep the same family and ignore synthetic bold/italic.
+    # For custom fonts, try to find a registered style variant first.
+    custom_variant = _resolve_custom_variant_font(base_font_name, eff_bold, eff_italic)
+    if custom_variant:
+        return resolve_font_name(custom_variant, fallback_font=fallback_font)
+
+    # Fall back to the same family when no style variant exists.
     return resolve_font_name(base_font_name, fallback_font=fallback_font)
 
 
@@ -641,10 +681,16 @@ def parse_style_attr(style_text: str) -> dict:
             out["color"] = v
         elif k == "font-family":
             out["font_family"] = v
-        elif k == "font-weight" and (v.lower() == "bold" or v == "700"):
-            out["bold"] = True
-        elif k == "font-style" and v.lower() == "italic":
-            out["italic"] = True
+        elif k == "font-weight":
+            vl = v.lower()
+            if vl in {"bold", "bolder"}:
+                out["bold"] = True
+            elif vl.isdigit() and int(vl) >= 600:
+                out["bold"] = True
+        elif k == "font-style":
+            vl = v.lower()
+            if ("italic" in vl) or ("oblique" in vl):
+                out["italic"] = True
     return out
 
 
@@ -679,27 +725,32 @@ class InlineHtmlParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         name = tag.lower()
         attrs_map = {k.lower(): (v or "") for k, v in attrs}
+        style_updates = parse_style_attr(attrs_map.get("style", ""))
         if name == "br":
             self._add_newline("br")
             self._push_no_style(name)
             return
         if name in {"b", "strong"}:
-            self._push_style(name, {"bold": True})
+            self._push_style(name, {**style_updates, "bold": True})
             return
         if name in {"i", "em"}:
-            self._push_style(name, {"italic": True})
+            self._push_style(name, {**style_updates, "italic": True})
             return
         if name == "font":
             self._push_style(
                 name,
                 {
+                    **style_updates,
                     "font_family": attrs_map.get("face"),
                     "color": attrs_map.get("color"),
                 },
             )
             return
         if name == "span":
-            self._push_style(name, parse_style_attr(attrs_map.get("style", "")))
+            self._push_style(name, style_updates)
+            return
+        if style_updates:
+            self._push_style(name, style_updates)
             return
         if name in {"p", "div", "li"}:
             self._push_no_style(name)
@@ -784,6 +835,8 @@ def build_styled_tokens(
     plain_text: str,
     html_text: str | None,
     base_font: str,
+    base_bold: bool,
+    base_italic: bool,
     base_color: tuple[float, float, float],
     fallback_font: str,
 ) -> list[dict]:
@@ -808,14 +861,25 @@ def build_styled_tokens(
         style = token.get("style", {})
         style_font = parse_font_family(style.get("font_family"))
         font_for_style = resolve_font_name(style_font, fallback_font=base_font) if style_font else base_font
+        requested_bold = bool(base_bold or style.get("bold", False))
+        requested_italic = bool(base_italic or style.get("italic", False))
         draw_font = apply_emphasis_to_font(
             base_font_name=font_for_style,
-            bold=bool(style.get("bold", False)),
-            italic=bool(style.get("italic", False)),
+            bold=requested_bold,
+            italic=requested_italic,
             fallback_font=fallback_font,
         )
         draw_color = parse_css_color(str(style.get("color", "")), base_color) if style.get("color") else base_color
-        tokens.append({"text": text, "font": draw_font, "color": draw_color})
+        _, resolved_bold, resolved_italic = _decompose_font_style(draw_font)
+        tokens.append(
+            {
+                "text": text,
+                "font": draw_font,
+                "color": draw_color,
+                "faux_bold": requested_bold and not resolved_bold,
+                "faux_italic": requested_italic and not resolved_italic,
+            }
+        )
     return tokens
 
 
@@ -871,10 +935,25 @@ def layout_styled_lines(tokens: list[dict], size: float, wrap_width: float | Non
                 push_line(force_empty=False)
                 if chunk.isspace():
                     continue
-            if current_runs and current_runs[-1]["font"] == font and current_runs[-1]["color"] == color:
+            same_style = (
+                current_runs
+                and current_runs[-1]["font"] == font
+                and current_runs[-1]["color"] == color
+                and current_runs[-1].get("faux_bold", False) == token.get("faux_bold", False)
+                and current_runs[-1].get("faux_italic", False) == token.get("faux_italic", False)
+            )
+            if same_style:
                 current_runs[-1]["text"] += chunk
             else:
-                current_runs.append({"text": chunk, "font": font, "color": color})
+                current_runs.append(
+                    {
+                        "text": chunk,
+                        "font": font,
+                        "color": color,
+                        "faux_bold": token.get("faux_bold", False),
+                        "faux_italic": token.get("faux_italic", False),
+                    }
+                )
             current_width += chunk_w
 
     push_line(force_empty=True)
@@ -918,9 +997,22 @@ def draw_styled_line(c: canvas.Canvas, runs: list[dict], x: float, y: float, siz
         text = run["text"]
         if not text:
             continue
+        faux_bold = bool(run.get("faux_bold", False))
+        faux_italic = bool(run.get("faux_italic", False))
         c.setFont(run["font"], size)
         c.setFillColor(Color(*run["color"]))
-        c.drawString(cursor_x, y, text)
+        if faux_italic:
+            shear = 0.22
+            c.saveState()
+            c.transform(1, 0, shear, 1, 0, 0)
+            draw_x = cursor_x - (shear * y)
+        else:
+            draw_x = cursor_x
+        c.drawString(draw_x, y, text)
+        if faux_bold:
+            c.drawString(draw_x + max(0.25, size * 0.018), y, text)
+        if faux_italic:
+            c.restoreState()
         cursor_x += pdfmetrics.stringWidth(text, run["font"], size)
 
 
@@ -948,6 +1040,31 @@ def draw_anchor(c: canvas.Canvas, x: float, y: float) -> None:
     c.line(x - 6, y, x + 6, y)
     c.line(x, y - 6, x, y + 6)
     c.restoreState()
+
+
+def _image_reader_from_src(src: str) -> ImageReader | None:
+    if not isinstance(src, str) or not src.strip():
+        return None
+    value = src.strip()
+
+    if value.startswith("data:image"):
+        match = re.match(r"^data:image/[^;]+;base64,(.*)$", value, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        try:
+            image_bytes = base64.b64decode(match.group(1), validate=False)
+            return ImageReader(io.BytesIO(image_bytes))
+        except Exception:
+            return None
+
+    path = Path(value)
+    if path.exists() and path.is_file():
+        try:
+            return ImageReader(str(path))
+        except Exception:
+            return None
+
+    return None
 
 
 def draw_overlay(
@@ -981,6 +1098,15 @@ def draw_overlay(
         if custom_font_registered and font_name.lower() == "customfont":
             font_name = "CustomFont"
         font_name = resolve_font_name(font_name, fallback_font=default_font)
+        _, font_has_bold, font_has_italic = _decompose_font_style(font_name)
+        field_bold = bool(field.get("bold", False)) or font_has_bold
+        field_italic = bool(field.get("italic", False)) or font_has_italic
+        effective_font_name = apply_emphasis_to_font(
+            base_font_name=font_name,
+            bold=field_bold,
+            italic=field_italic,
+            fallback_font=default_font,
+        )
         size = float(field.get("size", default_size))
         color = field.get("color", [0, 0, 0])
         max_width = field.get("max_width")
@@ -988,14 +1114,14 @@ def draw_overlay(
         text, html_text = resolve_field_content(field, name, data, placeholder_mode)
 
         fitted_size = fit_font_size(
-            font_name=font_name,
+            font_name=effective_font_name,
             text=text,
             size=size,
             max_width=float(max_width) if max_width is not None else None,
         )
 
         c.setFillColor(Color(*base_color))
-        c.setFont(font_name, fitted_size)
+        c.setFont(effective_font_name, fitted_size)
 
         wrap_text = field.get("wrap_text", False)
         wrap_width = field.get("wrap_width")   # set when "Wrap text" checkbox is on
@@ -1004,6 +1130,8 @@ def draw_overlay(
             plain_text=text,
             html_text=html_text,
             base_font=font_name,
+            base_bold=field_bold,
+            base_italic=field_italic,
             base_color=base_color,
             fallback_font=default_font,
         )
@@ -1058,7 +1186,7 @@ def draw_overlay(
                 else:
                     start_x = raw_x
                 draw_styled_line(c, line["runs"], start_x, y_pos, fitted_size)
-        elif has_rich_content:
+        elif has_rich_content or field_bold or field_italic:
             line = styled_lines[0] if styled_lines else {"runs": [], "width": 0.0}
             line_width = float(line["width"])
             if align == "center":
@@ -1087,6 +1215,38 @@ def draw_overlay(
             c.line(0, raw_y, page_w, raw_y)
             c.line(raw_x, 0, raw_x, page_h)
             c.restoreState()
+
+    image_cache: dict[str, ImageReader | None] = {}
+    for image in fields_cfg.get("images", []):
+        src = str(image.get("src", ""))
+        width = float(image.get("w", 0.0))
+        height = float(image.get("h", 0.0))
+        x = float(image.get("x", 0.0)) + dx
+        y = float(image.get("y", 0.0)) + dy
+
+        if width <= 0 or height <= 0 or not src:
+            continue
+
+        if src not in image_cache:
+            image_cache[src] = _image_reader_from_src(src)
+        image_reader = image_cache[src]
+        if image_reader is None:
+            print(f"[WARN] Skipping image: unreadable source for '{image.get('name', 'image')}'.")
+            continue
+
+        try:
+            c.drawImage(
+                image_reader,
+                x,
+                y,
+                width=width,
+                height=height,
+                mask='auto',
+                preserveAspectRatio=False,
+                anchor='sw',
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to draw image '{image.get('name', 'image')}': {exc}")
 
     c.showPage()
     c.save()
