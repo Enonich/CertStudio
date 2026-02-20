@@ -86,6 +86,63 @@ function escapeCssString(value) {
   return String(value).replace(/["\\]/g, '\\$&');
 }
 
+function resolveFontTokenToCss(fontToken) {
+  const token = String(fontToken ?? '').trim();
+  if (!token) {
+    return {
+      family: '',
+      weight: '',
+      style: '',
+    };
+  }
+
+  const hasBold = /bold/i.test(token);
+  const hasItalic = /(oblique|italic)/i.test(token);
+  const quotedToken = `"${escapeCssString(token)}"`;
+
+  if (token.startsWith('Helvetica')) {
+    return {
+      family: `${quotedToken}, Helvetica, Arial, sans-serif`,
+      weight: hasBold ? 'bold' : '',
+      style: hasItalic ? 'italic' : '',
+    };
+  }
+  if (token.startsWith('Times')) {
+    return {
+      family: `${quotedToken}, "Times New Roman", Times, serif`,
+      weight: hasBold ? 'bold' : '',
+      style: hasItalic ? 'italic' : '',
+    };
+  }
+  if (token.startsWith('Courier')) {
+    return {
+      family: `${quotedToken}, "Courier New", Courier, monospace`,
+      weight: hasBold ? 'bold' : '',
+      style: hasItalic ? 'italic' : '',
+    };
+  }
+  if (token === 'Symbol') {
+    return {
+      family: `${quotedToken}, Symbol`,
+      weight: '',
+      style: '',
+    };
+  }
+  if (token === 'ZapfDingbats') {
+    return {
+      family: `${quotedToken}, "Zapf Dingbats", Wingdings, fantasy`,
+      weight: '',
+      style: '',
+    };
+  }
+
+  return {
+    family: quotedToken,
+    weight: '',
+    style: '',
+  };
+}
+
 // ReportLab Base-14 fonts (always available without custom registration)
 const REPORTLAB_BASE14_FONTS = [
   { value: 'Helvetica', label: 'Helvetica (Sans-serif)' },
@@ -102,6 +159,14 @@ const REPORTLAB_BASE14_FONTS = [
   { value: 'Courier-BoldOblique', label: 'Courier Bold Oblique' },
   { value: 'Symbol', label: 'Symbol' },
   { value: 'ZapfDingbats', label: 'Zapf Dingbats' },
+];
+
+const COMMON_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 42, 48, 60, 72];
+
+const QUICK_COLOR_SWATCHES = [
+  '#000000', '#1f1f1f', '#444444', '#666666', '#888888', '#aaaaaa', '#ffffff',
+  '#d9534f', '#f0ad4e', '#ffd166', '#5cb85c', '#28a745', '#20c997', '#17a2b8',
+  '#1f9fff', '#0d6efd', '#6f42c1', '#e83e8c', '#ff6b6b', '#ffa94d', '#74c0fc',
 ];
 
 function uid() {
@@ -242,6 +307,7 @@ async function loadTemplate(file, preset) {
 
 export default function App() {
   const layerRef = useRef(null);
+  const fontPickerRef = useRef(null);
   const [theme, setTheme] = useState('dark');
   const [zoom, setZoom] = useState(1);
   const [templateFile, setTemplateFile] = useState(null);
@@ -268,6 +334,8 @@ export default function App() {
   const [customSize, setCustomSize] = useState({ width: 612, height: 792 });
   const [fields, setFields] = useState([]);
   const [activeFieldId, setActiveFieldId] = useState(null);
+  const [imageItems, setImageItems] = useState([]);
+  const [activeImageId, setActiveImageId] = useState(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [draftBox, setDraftBox] = useState(null);
   const [sampleValues, setSampleValues] = useState({});
@@ -275,11 +343,20 @@ export default function App() {
   const [isEditingText, setIsEditingText] = useState(false);
   const editingDraftRef = useRef({ name: null, html: '', text: '' });
   const lastSelectionRangeRef = useRef(null);
+  const toolbarInteractionRef = useRef(false);
   const [interaction, setInteraction] = useState(null);
   const [alignmentGuides, setAlignmentGuides] = useState([]);
   const [status, setStatus] = useState('');
   const [previewUrl, setPreviewUrl] = useState(null);
   const [latestDownload, setLatestDownload] = useState(null);
+  const [fontPickerOpen, setFontPickerOpen] = useState(false);
+  const [fontHoverFamily, setFontHoverFamily] = useState('');
+  const [sizePickerOpen, setSizePickerOpen] = useState(false);
+  const [sizeHoverValue, setSizeHoverValue] = useState(null);
+  const [colorPickerOpen, setColorPickerOpen] = useState(false);
+  const [colorHoverValue, setColorHoverValue] = useState('');
+  const [activeEditorFont, setActiveEditorFont] = useState('');
+  const [insertMenuOpen, setInsertMenuOpen] = useState(false);
   const [layoutsMenuOpen, setLayoutsMenuOpen] = useState(false);
   const [generateMenuOpen, setGenerateMenuOpen] = useState(false);
   const [fontMenuOpen, setFontMenuOpen] = useState(false);
@@ -307,6 +384,7 @@ export default function App() {
   }, [preset, customSize]);
 
   const activeField = fields.find((field) => field.id === activeFieldId) ?? null;
+  const activeImage = imageItems.find((image) => image.id === activeImageId) ?? null;
   const availableFontValues = useMemo(
     () => new Set([
       ...REPORTLAB_BASE14_FONTS.map((f) => f.value),
@@ -314,6 +392,14 @@ export default function App() {
     ]),
     [customFonts]
   );
+
+  const fontPickerGroups = useMemo(() => {
+    const custom = customFonts.filter((font) => !REPORTLAB_BASE14_FONTS.some((f) => f.value === font.name));
+    return {
+      builtIn: REPORTLAB_BASE14_FONTS,
+      custom,
+    };
+  }, [customFonts]);
 
   useEffect(() => {
     if (!isEditingText || !activeField?.name) {
@@ -328,6 +414,18 @@ export default function App() {
     editingDraftRef.current = { name, html, text };
     lastSelectionRangeRef.current = null;
   }, [isEditingText, activeFieldId]);
+
+  useEffect(() => {
+    if (!activeFieldId) {
+      setFontHoverFamily('');
+      setActiveEditorFont('');
+      setFontPickerOpen(false);
+      setSizeHoverValue(null);
+      setSizePickerOpen(false);
+      setColorHoverValue('');
+      setColorPickerOpen(false);
+    }
+  }, [activeFieldId]);
 
   useEffect(() => {
     if (!isEditingText || !activeField?.id) {
@@ -409,6 +507,11 @@ export default function App() {
       ...prev,
       [fieldName]: csvColumn
     }));
+
+    if (csvColumn && activeField?.name === fieldName) {
+      commitActiveEditingDraft();
+      setIsEditingText(false);
+    }
     
     // Update sample value from CSV first row if mapped
     if (csvColumn && csvFirstRow[csvColumn]) {
@@ -565,7 +668,13 @@ export default function App() {
     const handleClickOutside = (event) => {
       const clickedButton = event.target.closest('.menu-button');
       const clickedDropdown = event.target.closest('.dropdown-menu');
+      const clickedFontPicker = event.target.closest('.font-picker');
+      const clickedSizePicker = event.target.closest('.size-picker');
+      const clickedColorPicker = event.target.closest('.color-picker');
       
+      if (insertMenuOpen && !clickedButton?.textContent?.includes('Insert') && !clickedDropdown) {
+        setInsertMenuOpen(false);
+      }
       if (layoutsMenuOpen && !clickedButton?.textContent?.includes('Layouts') && !clickedDropdown) {
         setLayoutsMenuOpen(false);
       }
@@ -575,10 +684,22 @@ export default function App() {
       if (fontMenuOpen && !clickedButton?.textContent?.includes('Fonts') && !clickedDropdown) {
         setFontMenuOpen(false);
       }
+      if (fontPickerOpen && !clickedFontPicker) {
+        setFontPickerOpen(false);
+        setFontHoverFamily('');
+      }
+      if (sizePickerOpen && !clickedSizePicker) {
+        setSizePickerOpen(false);
+        setSizeHoverValue(null);
+      }
+      if (colorPickerOpen && !clickedColorPicker) {
+        setColorPickerOpen(false);
+        setColorHoverValue('');
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [layoutsMenuOpen, generateMenuOpen, fontMenuOpen]);
+  }, [insertMenuOpen, layoutsMenuOpen, generateMenuOpen, fontMenuOpen, fontPickerOpen, sizePickerOpen, colorPickerOpen]);
 
   useEffect(() => {
     const classList = document.documentElement.classList;
@@ -642,6 +763,8 @@ export default function App() {
           x: field.align === 'center' ? (leftPt + rightPt) / 2 : field.align === 'right' ? rightPt : leftPt,
           y: baselineY,
           font: fontName,
+          bold: Boolean(field.bold),
+          italic: Boolean(field.italic),
           size: fieldSizePt,
           align: field.align,
           color: field.color,
@@ -666,6 +789,28 @@ export default function App() {
 
         return mapped;
       }),
+      images: imageItems.map((image) => {
+        const imageWidthPt = image.w * scales.x;
+        const imageHeightPt = image.h * scales.y;
+        const imageTopPt = (template.displayHeight - image.y) * scales.y;
+        const imageBottomPt = imageTopPt - imageHeightPt;
+        return {
+          id: image.id,
+          name: image.name,
+          x: image.x * scales.x,
+          y: imageBottomPt,
+          w: imageWidthPt,
+          h: imageHeightPt,
+          src: image.src,
+        };
+      }),
+      layout_state: {
+        sample_values: sampleValues,
+        sample_html_values: sampleHtmlValues,
+        field_mappings: fieldMappings,
+        use_csv: useCsv,
+        generate_options: generateOptions,
+      },
     };
   };
 
@@ -691,12 +836,16 @@ export default function App() {
     return payload;
   };
 
-  const payloadToBoxes = (payload) => {
+  const payloadToLayout = (payload) => {
     if (!template || !scales || !payload || !Array.isArray(payload.fields)) {
-      return [];
+      return {
+        fields: [],
+        images: [],
+        layoutState: null,
+      };
     }
 
-    return payload.fields.map((field, idx) => {
+    const mappedFields = payload.fields.map((field, idx) => {
       const align = field.align ?? 'left';
       const widthPt = Number(field.box_width ?? field.max_width ?? 150);
       const widthPx = widthPt / scales.x;
@@ -737,6 +886,12 @@ export default function App() {
       if (fontName.includes('Oblique') || fontName.includes('Italic')) {
         italic = true;
       }
+      if (typeof field.bold === 'boolean') {
+        bold = field.bold;
+      }
+      if (typeof field.italic === 'boolean') {
+        italic = field.italic;
+      }
 
       // Get base font family
       if (fontName.startsWith('Helvetica')) {
@@ -775,6 +930,115 @@ export default function App() {
         template.displayHeight
       );
     });
+
+    const mappedImages = Array.isArray(payload.images)
+      ? payload.images
+          .map((image, idx) => {
+            const wPt = Number(image.w ?? 0);
+            const hPt = Number(image.h ?? 0);
+            const xPt = Number(image.x ?? 0);
+            const yPt = Number(image.y ?? 0);
+            const src = typeof image.src === 'string' ? image.src : '';
+            if (!src || !Number.isFinite(wPt) || !Number.isFinite(hPt) || wPt <= 0 || hPt <= 0) {
+              return null;
+            }
+
+            const widthPx = Math.max(8, wPt / scales.x);
+            const heightPx = Math.max(8, hPt / scales.y);
+            const xPx = xPt / scales.x;
+            const topPt = yPt + hPt;
+            const yPx = template.displayHeight - (topPt / scales.y);
+
+            return clampBox(
+              {
+                id: image.id ?? uid(),
+                name: image.name ?? `image_${idx + 1}`,
+                x: xPx,
+                y: yPx,
+                w: widthPx,
+                h: heightPx,
+                src,
+              },
+              template.displayWidth,
+              template.displayHeight
+            );
+          })
+          .filter(Boolean)
+      : [];
+
+    const layoutState = payload.layout_state && typeof payload.layout_state === 'object'
+      ? payload.layout_state
+      : null;
+
+    return {
+      fields: mappedFields,
+      images: mappedImages,
+      layoutState,
+    };
+  };
+
+  const readImageAsDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read image file.'));
+      reader.readAsDataURL(file);
+    });
+
+  const getImageNaturalSize = (src) =>
+    new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      image.onerror = () => reject(new Error('Failed to load image.'));
+      image.src = src;
+    });
+
+  const importImageElement = async (event) => {
+    if (!template) {
+      setStatus('Load a template before importing an image.');
+      event.target.value = '';
+      return;
+    }
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const src = await readImageAsDataUrl(file);
+      const natural = await getImageNaturalSize(src);
+      const maxPreviewWidth = Math.min(260, template.displayWidth * 0.4);
+      const maxPreviewHeight = Math.min(120, template.displayHeight * 0.25);
+      const scale = Math.min(
+        1,
+        maxPreviewWidth / Math.max(1, natural.width),
+        maxPreviewHeight / Math.max(1, natural.height)
+      );
+
+      const nextImage = {
+        id: uid(),
+        name: file.name.replace(/\.[^.]+$/, '') || `image_${imageItems.length + 1}`,
+        x: 24,
+        y: 24,
+        w: Math.max(16, natural.width * scale),
+        h: Math.max(16, natural.height * scale),
+        src,
+      };
+
+      setImageItems((prev) => [
+        ...prev,
+        clampBox(nextImage, template.displayWidth, template.displayHeight),
+      ]);
+      commitActiveEditingDraft();
+      setActiveImageId(nextImage.id);
+      setActiveFieldId(null);
+      setIsEditingText(false);
+      setStatus(`Imported image: ${file.name}`);
+    } catch (error) {
+      setStatus(`Failed to import image: ${error.message}`);
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const loadFile = async (event) => {
@@ -787,7 +1051,9 @@ export default function App() {
     setTemplate(loaded);
     setTemplateFile(file);
     setFields([]);
+    setImageItems([]);
     setActiveFieldId(null);
+    setActiveImageId(null);
     setSampleValues({});
     setSampleHtmlValues({});
     setStatus(`Loaded template: ${loaded.name}`);
@@ -819,6 +1085,64 @@ export default function App() {
     };
   };
 
+  const commitFieldDraft = (fieldName) => {
+    const resolvedName = String(fieldName ?? '').trim();
+    if (!resolvedName) {
+      return;
+    }
+
+    const hasDraft = editingDraftRef.current.name === resolvedName;
+    const textValue = hasDraft
+      ? editingDraftRef.current.text ?? ''
+      : sampleValues[resolvedName] ?? '';
+    const htmlValue = sanitizeHtml(
+      hasDraft
+        ? editingDraftRef.current.html ?? plainTextToHtml(textValue)
+        : sampleHtmlValues[resolvedName] ?? plainTextToHtml(textValue)
+    );
+
+    setSampleValues((prev) => {
+      if (prev[resolvedName] === textValue) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [resolvedName]: textValue,
+      };
+    });
+    setSampleHtmlValues((prev) => {
+      if (prev[resolvedName] === htmlValue) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [resolvedName]: htmlValue,
+      };
+    });
+
+    if (hasDraft) {
+      editingDraftRef.current = {
+        name: resolvedName,
+        html: htmlValue,
+        text: textValue,
+      };
+    }
+  };
+
+  const commitActiveEditingDraft = () => {
+    if (!isEditingText) {
+      return;
+    }
+    const draftName = editingDraftRef.current.name;
+    if (draftName) {
+      commitFieldDraft(draftName);
+      return;
+    }
+    if (activeField?.name) {
+      commitFieldDraft(activeField.name);
+    }
+  };
+
   const beginDraw = (event) => {
     if (!template || interaction) {
       return;
@@ -827,7 +1151,10 @@ export default function App() {
     // Check if click is on a field box - if not, deselect active field
     const isFieldBox = event.target.closest('.field-box');
     if (!isFieldBox) {
+      commitActiveEditingDraft();
+      setIsEditingText(false);
       setActiveFieldId(null);
+      setActiveImageId(null);
     }
     
     const point = getPointFromEvent(event);
@@ -842,30 +1169,49 @@ export default function App() {
     });
   };
 
-  const beginMove = (event, fieldId) => {
+  const beginMove = (event, targetId, targetType = 'field') => {
     event.preventDefault();
     event.stopPropagation();
     
     const point = getPointFromEvent(event);
-    const field = fields.find((item) => item.id === fieldId);
-    if (!field) {
+    const target = targetType === 'image'
+      ? imageItems.find((item) => item.id === targetId)
+      : fields.find((item) => item.id === targetId);
+    if (!target) {
       return;
     }
-    setActiveFieldId(fieldId);
+    commitActiveEditingDraft();
+    if (targetType === 'image') {
+      setActiveImageId(targetId);
+      setActiveFieldId(null);
+    } else {
+      setActiveFieldId(targetId);
+      setActiveImageId(null);
+    }
     setIsEditingText(false);
-    setInteraction({ mode: 'move', fieldId, startX: point.x, startY: point.y, initial: field });
+    setInteraction({ mode: 'move', targetType, targetId, startX: point.x, startY: point.y, initial: target });
   };
 
-  const beginResize = (event, fieldId, direction) => {
+  const beginResize = (event, targetId, direction, targetType = 'field') => {
     event.preventDefault();
     event.stopPropagation();
     const point = getPointFromEvent(event);
-    const field = fields.find((item) => item.id === fieldId);
-    if (!field) {
+    const target = targetType === 'image'
+      ? imageItems.find((item) => item.id === targetId)
+      : fields.find((item) => item.id === targetId);
+    if (!target) {
       return;
     }
-    setActiveFieldId(fieldId);
-    setInteraction({ mode: 'resize', fieldId, startX: point.x, startY: point.y, initial: field, direction });
+    commitActiveEditingDraft();
+    setIsEditingText(false);
+    if (targetType === 'image') {
+      setActiveImageId(targetId);
+      setActiveFieldId(null);
+    } else {
+      setActiveFieldId(targetId);
+      setActiveImageId(null);
+    }
+    setInteraction({ mode: 'resize', targetType, targetId, startX: point.x, startY: point.y, initial: target, direction });
   };
 
   const getActiveEditorEl = () =>
@@ -877,6 +1223,56 @@ export default function App() {
     }
     const range = selection.getRangeAt(0);
     return editorEl.contains(range.startContainer) && editorEl.contains(range.endContainer);
+  };
+
+  const cacheSelectionRangeFromEditor = () => {
+    const editorEl = getActiveEditorEl();
+    const selection = window.getSelection();
+    if (!editorEl || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return;
+    }
+    if (!selectionInsideEditor(editorEl, selection)) {
+      return;
+    }
+    lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+  };
+
+  const applyFontFamilyToSelection = (editorEl, range, fontToken) => {
+    if (!editorEl || !range || range.collapsed) {
+      return false;
+    }
+    const token = String(fontToken ?? '').trim();
+    if (!token) {
+      return false;
+    }
+
+    const cssFont = resolveFontTokenToCss(token);
+    const wrapper = document.createElement('span');
+    wrapper.style.fontFamily = cssFont.family || token;
+    if (cssFont.weight) {
+      wrapper.style.fontWeight = cssFont.weight;
+    }
+    if (cssFont.style) {
+      wrapper.style.fontStyle = cssFont.style;
+    }
+
+    try {
+      const fragment = range.extractContents();
+      wrapper.appendChild(fragment);
+      range.insertNode(wrapper);
+
+      const selection = window.getSelection();
+      if (selection) {
+        const nextRange = document.createRange();
+        nextRange.selectNodeContents(wrapper);
+        selection.removeAllRanges();
+        selection.addRange(nextRange);
+        lastSelectionRangeRef.current = nextRange.cloneRange();
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
   };
 
   const applyFormatting = (command, value = null) => {
@@ -923,13 +1319,39 @@ export default function App() {
       return false;
     }
 
-    document.execCommand(command, false, value);
+    const htmlBeforeCommand = editorEl.innerHTML;
+    let didApply = false;
+
+    if (command === 'fontName' && typeof value === 'string' && value.trim()) {
+      didApply = applyFontFamilyToSelection(
+        editorEl,
+        selectionAfterRestore.getRangeAt(0),
+        value
+      );
+    } else {
+      try {
+        document.execCommand('styleWithCSS', false, true);
+      } catch (error) {
+        // no-op
+      }
+      didApply = document.execCommand(command, false, value);
+      if (!didApply && editorEl.innerHTML !== htmlBeforeCommand) {
+        didApply = true;
+      }
+    }
+    if (!didApply) {
+      return false;
+    }
 
     editingDraftRef.current = {
       name: activeField.name,
       html: editorEl.innerHTML,
       text: editorEl.innerText,
     };
+    const selectionAfterCommand = window.getSelection();
+    if (selectionAfterCommand && selectionAfterCommand.rangeCount > 0) {
+      lastSelectionRangeRef.current = selectionAfterCommand.getRangeAt(0).cloneRange();
+    }
 
     return true;
   };
@@ -1011,12 +1433,214 @@ export default function App() {
         }
       }
 
+      if (requireSelection && selectionMessage) {
+        setStatus(selectionMessage);
+        return;
+      }
+
       applyWholeFieldStyle(fieldPatch);
       return;
     }
 
     applyWholeFieldStyle(fieldPatch);
   };
+
+  const isTypingSurface = (target) => {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    if (target.isContentEditable || target.closest('[contenteditable="true"]')) {
+      return true;
+    }
+    const tag = target.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const target = event.target;
+      const typingSurface = isTypingSurface(target);
+      const modKey = event.ctrlKey || event.metaKey;
+
+      if (event.key === 'Escape' && isEditingText) {
+        event.preventDefault();
+        commitActiveEditingDraft();
+        lastSelectionRangeRef.current = null;
+        setIsEditingText(false);
+        return;
+      }
+
+      if (modKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'b') {
+          if (activeField) {
+            event.preventDefault();
+            handleInlineStyleClick('bold', 'bold');
+          }
+          return;
+        }
+        if (key === 'i') {
+          if (activeField) {
+            event.preventDefault();
+            handleInlineStyleClick('italic', 'italic');
+          }
+          return;
+        }
+        if (key === 'u') {
+          const editorEl = getActiveEditorEl();
+          if (activeField && editorEl && (isEditingText || editorEl.isContentEditable)) {
+            event.preventDefault();
+            applyInlineCommandOrFieldUpdate({
+              command: 'underline',
+              fieldPatch: {},
+              requireSelection: true,
+              selectionMessage: 'Select text in the field to underline.',
+            });
+          }
+          return;
+        }
+      }
+
+      if (typingSurface) {
+        return;
+      }
+
+      if ((event.key === 'Delete' || event.key === 'Backspace') && !isEditingText) {
+        if (activeFieldId) {
+          event.preventDefault();
+          deleteField(activeFieldId);
+          return;
+        }
+        if (activeImageId) {
+          event.preventDefault();
+          deleteImage(activeImageId);
+        }
+        return;
+      }
+
+      if (isEditingText) {
+        return;
+      }
+
+      const keyStep = event.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      switch (event.key) {
+        case 'ArrowLeft':
+          dx = -keyStep;
+          break;
+        case 'ArrowRight':
+          dx = keyStep;
+          break;
+        case 'ArrowUp':
+          dy = -keyStep;
+          break;
+        case 'ArrowDown':
+          dy = keyStep;
+          break;
+        default:
+          return;
+      }
+
+      if (activeFieldId && activeField) {
+        event.preventDefault();
+        updateField(activeFieldId, {
+          x: activeField.x + dx,
+          y: activeField.y + dy,
+        });
+        return;
+      }
+      if (activeImageId && activeImage) {
+        event.preventDefault();
+        updateImage(activeImageId, {
+          x: activeImage.x + dx,
+          y: activeImage.y + dy,
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    isEditingText,
+    activeField,
+    activeImage,
+    activeFieldId,
+    activeImageId,
+    applyInlineCommandOrFieldUpdate,
+    handleInlineStyleClick,
+  ]);
+
+  const normalizeFontMatch = (fontName) => {
+    if (!fontName) {
+      return '';
+    }
+    const cleaned = String(fontName)
+      .split(',')[0]
+      .replace(/^['"]+|['"]+$/g, '')
+      .trim();
+    if (!cleaned) {
+      return '';
+    }
+    const directMatch = [...availableFontValues].find((value) => value === cleaned);
+    if (directMatch) {
+      return directMatch;
+    }
+    const insensitive = [...availableFontValues].find(
+      (value) => value.toLowerCase() === cleaned.toLowerCase()
+    );
+    return insensitive || '';
+  };
+
+  const updateActiveEditorFont = () => {
+    if (!isEditingText || !activeField) {
+      setActiveEditorFont('');
+      return;
+    }
+    const editorEl = getActiveEditorEl();
+    if (!editorEl || !editorEl.isContentEditable) {
+      setActiveEditorFont('');
+      return;
+    }
+
+    const selection = window.getSelection();
+    const inEditor =
+      !!selection && selection.rangeCount > 0 && selectionInsideEditor(editorEl, selection);
+    if (!inEditor) {
+      setActiveEditorFont('');
+      return;
+    }
+
+    const commandFont = normalizeFontMatch(document.queryCommandValue('fontName'));
+    setActiveEditorFont(commandFont || '');
+  };
+
+  useEffect(() => {
+    if (!isEditingText || !activeField) {
+      setActiveEditorFont('');
+      return;
+    }
+
+    const handleSelectionOrKey = () => updateActiveEditorFont();
+    document.addEventListener('selectionchange', handleSelectionOrKey);
+    document.addEventListener('keyup', handleSelectionOrKey);
+    setTimeout(updateActiveEditorFont, 0);
+
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionOrKey);
+      document.removeEventListener('keyup', handleSelectionOrKey);
+    };
+  }, [isEditingText, activeFieldId, availableFontValues]);
+
+  const displayedFontValue =
+    fontHoverFamily ||
+    (isEditingText && activeEditorFont ? activeEditorFont : activeField?.font || 'Helvetica');
+  const displayedSizeValue =
+    sizeHoverValue ?? Number(activeField?.size ?? 18);
+  const displayedColorValue =
+    colorHoverValue || (activeField ? colorArrayToHex(activeField.color) : '#000000');
+  const activeFieldIsCsvMapped =
+    !!activeField && useCsv && Boolean(fieldMappings[activeField.name]);
 
   const moveDraw = (event) => {
     if (!template) {
@@ -1030,8 +1654,17 @@ export default function App() {
       if (interaction.mode === 'move') {
         const newX = interaction.initial.x + dx;
         const newY = interaction.initial.y + dy;
-        
-        updateField(interaction.fieldId, {
+
+        if (interaction.targetType === 'image') {
+          updateImage(interaction.targetId, {
+            x: newX,
+            y: newY,
+          });
+          setAlignmentGuides([]);
+          return;
+        }
+
+        updateField(interaction.targetId, {
           x: newX,
           y: newY,
         });
@@ -1039,7 +1672,7 @@ export default function App() {
         // Calculate alignment guides
         const guides = [];
         const threshold = 5; // pixels
-        const movingField = fields.find(f => f.id === interaction.fieldId);
+        const movingField = fields.find(f => f.id === interaction.targetId);
         
         if (movingField) {
           const movingCenterX = newX + movingField.w / 2;
@@ -1050,7 +1683,7 @@ export default function App() {
           const movingBottom = newY + movingField.h;
           
           fields.forEach(field => {
-            if (field.id === interaction.fieldId) return;
+            if (field.id === interaction.targetId) return;
             
             const centerX = field.x + field.w / 2;
             const centerY = field.y + field.h / 2;
@@ -1117,7 +1750,11 @@ export default function App() {
           newBox.h = Math.abs(newBox.h);
         }
         
-        updateField(interaction.fieldId, newBox);
+        if (interaction.targetType === 'image') {
+          updateImage(interaction.targetId, newBox);
+        } else {
+          updateField(interaction.targetId, newBox);
+        }
       }
       return;
     }
@@ -1172,6 +1809,31 @@ export default function App() {
     setActiveFieldId(newField.id);
     setDraftBox(null);
   };
+
+  useEffect(() => {
+    if (!interaction && !isDrawing) {
+      return;
+    }
+
+    const handleGlobalMove = (event) => {
+      if (!layerRef.current) {
+        return;
+      }
+      moveDraw(event);
+    };
+
+    const handleGlobalUp = () => {
+      endDraw();
+    };
+
+    window.addEventListener('mousemove', handleGlobalMove);
+    window.addEventListener('mouseup', handleGlobalUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleGlobalMove);
+      window.removeEventListener('mouseup', handleGlobalUp);
+    };
+  }, [interaction, isDrawing, moveDraw, endDraw]);
 
   const updateField = (id, patch) => {
     if (!template) {
@@ -1228,6 +1890,20 @@ export default function App() {
     );
   };
 
+  const updateImage = (id, patch) => {
+    if (!template) {
+      return;
+    }
+    setImageItems((prev) =>
+      prev.map((image) => {
+        if (image.id !== id) {
+          return image;
+        }
+        return clampBox({ ...image, ...patch }, template.displayWidth, template.displayHeight);
+      })
+    );
+  };
+
   const deleteField = (id) => {
     const fieldToDelete = fields.find(f => f.id === id);
     setFields((prev) => prev.filter((field) => field.id !== id));
@@ -1241,6 +1917,13 @@ export default function App() {
         delete newMappings[fieldToDelete.name];
         return newMappings;
       });
+    }
+  };
+
+  const deleteImage = (id) => {
+    setImageItems((prev) => prev.filter((image) => image.id !== id));
+    if (activeImageId === id) {
+      setActiveImageId(null);
     }
   };
 
@@ -1299,9 +1982,25 @@ export default function App() {
       return;
     }
     const payload = await response.json();
-    const next = payloadToBoxes(payload);
-    setFields(next);
-    setActiveFieldId(next[0]?.id ?? null);
+    const next = payloadToLayout(payload);
+    setFields(next.fields);
+    setImageItems(next.images);
+    setActiveFieldId(next.fields[0]?.id ?? null);
+    setActiveImageId(null);
+    if (next.layoutState) {
+      setSampleValues(next.layoutState.sample_values && typeof next.layoutState.sample_values === 'object' ? next.layoutState.sample_values : {});
+      setSampleHtmlValues(next.layoutState.sample_html_values && typeof next.layoutState.sample_html_values === 'object' ? next.layoutState.sample_html_values : {});
+      setFieldMappings(next.layoutState.field_mappings && typeof next.layoutState.field_mappings === 'object' ? next.layoutState.field_mappings : {});
+      setUseCsv(Boolean(next.layoutState.use_csv));
+      if (next.layoutState.generate_options && typeof next.layoutState.generate_options === 'object') {
+        setGenerateOptions((prev) => ({ ...prev, ...next.layoutState.generate_options }));
+      }
+    } else {
+      setSampleValues({});
+      setSampleHtmlValues({});
+      setFieldMappings({});
+      setUseCsv(false);
+    }
     setStatus(`Loaded ${targetName} from backend.`);
   };
 
@@ -1317,9 +2016,25 @@ export default function App() {
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
-      const next = payloadToBoxes(payload);
-      setFields(next);
-      setActiveFieldId(next[0]?.id ?? null);
+      const next = payloadToLayout(payload);
+      setFields(next.fields);
+      setImageItems(next.images);
+      setActiveFieldId(next.fields[0]?.id ?? null);
+      setActiveImageId(null);
+      if (next.layoutState) {
+        setSampleValues(next.layoutState.sample_values && typeof next.layoutState.sample_values === 'object' ? next.layoutState.sample_values : {});
+        setSampleHtmlValues(next.layoutState.sample_html_values && typeof next.layoutState.sample_html_values === 'object' ? next.layoutState.sample_html_values : {});
+        setFieldMappings(next.layoutState.field_mappings && typeof next.layoutState.field_mappings === 'object' ? next.layoutState.field_mappings : {});
+        setUseCsv(Boolean(next.layoutState.use_csv));
+        if (next.layoutState.generate_options && typeof next.layoutState.generate_options === 'object') {
+          setGenerateOptions((prev) => ({ ...prev, ...next.layoutState.generate_options }));
+        }
+      } else {
+        setSampleValues({});
+        setSampleHtmlValues({});
+        setFieldMappings({});
+        setUseCsv(false);
+      }
       setStatus(`Loaded ${file.name} from disk.`);
     } catch (error) {
       setStatus(`Failed to load fields file: ${error}`);
@@ -1554,6 +2269,19 @@ export default function App() {
               type="button"
               className="menu-button"
               onClick={() => {
+                setInsertMenuOpen(!insertMenuOpen);
+                setLayoutsMenuOpen(false);
+                setGenerateMenuOpen(false);
+                setFontMenuOpen(false);
+              }}
+            >
+              Insert
+            </button>
+            <button
+              type="button"
+              className="menu-button"
+              onClick={() => {
+                setInsertMenuOpen(false);
                 setLayoutsMenuOpen(!layoutsMenuOpen);
                 setGenerateMenuOpen(false);
                 setFontMenuOpen(false);
@@ -1565,6 +2293,7 @@ export default function App() {
               type="button"
               className="menu-button"
               onClick={() => {
+                setInsertMenuOpen(false);
                 setGenerateMenuOpen(!generateMenuOpen);
                 setLayoutsMenuOpen(false);
                 setFontMenuOpen(false);
@@ -1576,6 +2305,7 @@ export default function App() {
               type="button"
               className="menu-button"
               onClick={() => {
+                setInsertMenuOpen(false);
                 setFontMenuOpen(!fontMenuOpen);
                 setLayoutsMenuOpen(false);
                 setGenerateMenuOpen(false);
@@ -1583,6 +2313,36 @@ export default function App() {
             >
               Fonts
             </button>
+            {insertMenuOpen && (
+              <div className="dropdown-menu">
+                <div className="dropdown-content">
+                  <label>
+                    <span className="label-title">Template file</span>
+                    <span className="label-hint">PDF, JPG, or PNG</span>
+                    <input
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg"
+                      onChange={(event) => {
+                        loadFile(event);
+                        setInsertMenuOpen(false);
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span className="label-title">Signature or image</span>
+                    <span className="label-hint">Add signature/logo as draggable element</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(event) => {
+                        importImageElement(event);
+                        setInsertMenuOpen(false);
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
             {generateMenuOpen && (
               <div className="dropdown-menu">
                 <div className="dropdown-content">
@@ -1687,7 +2447,12 @@ export default function App() {
                     <button type="button" onClick={loadFromBackend} disabled={!selectedFieldsName} className="secondary-button">
                       Load
                     </button>
-                    <button type="button" onClick={saveToBackend} disabled={!template || fields.length === 0} className="secondary-button">
+                    <button
+                      type="button"
+                      onClick={saveToBackend}
+                      disabled={!template || (fields.length === 0 && imageItems.length === 0)}
+                      className="secondary-button"
+                    >
                       Save
                     </button>
                     <button
@@ -1714,7 +2479,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={exportJson}
-                    disabled={!template || fields.length === 0}
+                    disabled={!template || (fields.length === 0 && imageItems.length === 0)}
                     className="secondary-button"
                   >
                     Export to file
@@ -1830,15 +2595,8 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-secondary">
-          {/* Left side: Template controls (compact) */}
+          {/* Left side: canvas controls (compact) */}
           <div className="topbar-left-controls">
-            <div className="topbar-group compact">
-              <label>
-                <span className="label-title">Template file</span>
-                <span className="label-hint">PDF, JPG, or PNG</span>
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={loadFile} />
-              </label>
-            </div>
             <div className="topbar-group compact">
               <label>
                 <span className="label-title">Page size for images</span>
@@ -1890,150 +2648,333 @@ export default function App() {
           </div>
 
           {/* Right side: Editing controls (greyed out when no field is selected) - Photoshop style */}
-          <div className={`topbar-editing-controls ${!activeField ? 'disabled' : ''}`}>
-            <div className="text-control-item medium">
-              <span className="label-title">Field name</span>
-              <input
-                value={activeField?.name || ''}
-                onChange={(event) => activeField && updateField(activeField.id, { name: event.target.value })}
-                placeholder="Select field"
-              />
-            </div>
-            
-            <span className="control-divider"></span>
-            
-            <div className="text-control-item wide">
-              <span className="label-title">Font family</span>
-              <select
-                value={availableFontValues.has(activeField?.font) ? activeField.font : 'Helvetica'}
-                onChange={(event) =>
-                  applyInlineCommandOrFieldUpdate({
-                    command: 'fontName',
-                    value: event.target.value,
-                    fieldPatch: { font: event.target.value },
-                    requireSelection: true,
-                    selectionMessage: 'Select text in the field to apply font family.',
-                  })
-                }
-              >
-                <optgroup label="ReportLab Built-in Fonts">
-                  {REPORTLAB_BASE14_FONTS.map((family) => (
-                    <option key={family.value} value={family.value}>
-                      {family.label}
-                    </option>
-                  ))}
-                </optgroup>
-                {customFonts.length > 0 && (
-                  <optgroup label="Uploaded Custom Fonts">
-                    {customFonts
-                      .filter((font) => !REPORTLAB_BASE14_FONTS.some((f) => f.value === font.name))
-                      .map((font) => (
-                        <option key={font.name} value={font.name}>
-                          {font.name}
-                        </option>
-                      ))}
-                  </optgroup>
+          <div
+            className={`topbar-editing-controls ${!activeField ? 'disabled' : ''}`}
+            onMouseDownCapture={() => {
+              cacheSelectionRangeFromEditor();
+              toolbarInteractionRef.current = true;
+              window.setTimeout(() => {
+                toolbarInteractionRef.current = false;
+              }, 0);
+            }}
+          >
+            <div className="editing-row editing-row-primary">
+              <div className="text-control-item medium">
+                <span className="label-title">Field</span>
+                <input
+                  value={activeField?.name || ''}
+                  onChange={(event) => activeField && updateField(activeField.id, { name: event.target.value })}
+                  placeholder="Select field"
+                />
+              </div>
+
+              <div className="text-control-item wide font-picker" ref={fontPickerRef}>
+                <span className="label-title">Font</span>
+                <button
+                  type="button"
+                  className="font-picker-trigger"
+                  onMouseDown={(event) => {
+                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                    if (editorEl) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onClick={() => {
+                    setFontPickerOpen((prev) => !prev);
+                    setFontHoverFamily('');
+                  }}
+                  style={{ fontFamily: resolveFontTokenToCss(displayedFontValue).family || displayedFontValue }}
+                  title={displayedFontValue}
+                >
+                  {displayedFontValue}
+                </button>
+                {fontPickerOpen && (
+                  <div
+                    className="font-picker-menu"
+                    onMouseLeave={() => setFontHoverFamily('')}
+                  >
+                    <div className="font-picker-group-title">ReportLab Built-in Fonts</div>
+                    {fontPickerGroups.builtIn.map((family) => {
+                      const cssFont = resolveFontTokenToCss(family.value);
+                      return (
+                      <button
+                        key={family.value}
+                        type="button"
+                        className={`font-picker-option ${displayedFontValue === family.value ? 'active' : ''}`}
+                        onMouseDown={(event) => {
+                          const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                          if (editorEl) {
+                            event.preventDefault();
+                          }
+                        }}
+                        onMouseEnter={() => setFontHoverFamily(family.value)}
+                        onFocus={() => setFontHoverFamily(family.value)}
+                        onClick={() => {
+                          setFontHoverFamily('');
+                          setFontPickerOpen(false);
+                          applyInlineCommandOrFieldUpdate({
+                            command: 'fontName',
+                            value: family.value,
+                            fieldPatch: { font: family.value },
+                            requireSelection: false,
+                          });
+                          setActiveEditorFont(family.value);
+                        }}
+                        title={family.label}
+                        style={{
+                          fontFamily: cssFont.family || family.value,
+                          fontWeight: cssFont.weight || 'normal',
+                          fontStyle: cssFont.style || 'normal',
+                        }}
+                      >
+                        {family.label}
+                      </button>
+                      );
+                    })}
+                    {fontPickerGroups.custom.length > 0 && (
+                      <>
+                        <div className="font-picker-group-title">Uploaded Custom Fonts</div>
+                        {fontPickerGroups.custom.map((font) => (
+                          <button
+                            key={font.name}
+                            type="button"
+                            className={`font-picker-option ${displayedFontValue === font.name ? 'active' : ''}`}
+                            onMouseDown={(event) => {
+                              const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                              if (editorEl) {
+                                event.preventDefault();
+                              }
+                            }}
+                            onMouseEnter={() => setFontHoverFamily(font.name)}
+                            onFocus={() => setFontHoverFamily(font.name)}
+                            onClick={() => {
+                              setFontHoverFamily('');
+                              setFontPickerOpen(false);
+                              applyInlineCommandOrFieldUpdate({
+                                command: 'fontName',
+                                value: font.name,
+                                fieldPatch: { font: font.name },
+                                requireSelection: false,
+                              });
+                              setActiveEditorFont(font.name);
+                            }}
+                            title={font.name}
+                            style={{ fontFamily: resolveFontTokenToCss(font.name).family || font.name }}
+                          >
+                            {font.name}
+                          </button>
+                        ))}
+                      </>
+                    )}
+                  </div>
                 )}
-              </select>
+              </div>
+
+              <div className="text-control-item small size-picker">
+                <span className="label-title">Size</span>
+                <div className="compact-inline">
+                  <input
+                    type="number"
+                    value={displayedSizeValue}
+                    onChange={(event) => activeField && updateField(activeField.id, { size: Number(event.target.value) })}
+                    placeholder="12"
+                  />
+                  <button
+                    type="button"
+                    className="font-picker-trigger size-trigger"
+                    onMouseDown={(event) => {
+                      const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                      if (editorEl) {
+                        event.preventDefault();
+                      }
+                    }}
+                    onClick={() => {
+                      setSizePickerOpen((prev) => !prev);
+                      setSizeHoverValue(null);
+                    }}
+                  >
+                    ▾
+                  </button>
+                </div>
+                {sizePickerOpen && (
+                  <div
+                    className="font-picker-menu size-picker-menu"
+                    onMouseLeave={() => setSizeHoverValue(null)}
+                  >
+                    <div className="font-picker-group-title">Quick Sizes</div>
+                    {COMMON_FONT_SIZES.map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        className={`font-picker-option ${Number(activeField?.size) === size ? 'active' : ''}`}
+                        onMouseDown={(event) => {
+                          const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                          if (editorEl) {
+                            event.preventDefault();
+                          }
+                        }}
+                        onMouseEnter={() => setSizeHoverValue(size)}
+                        onFocus={() => setSizeHoverValue(size)}
+                        onClick={() => {
+                          setSizeHoverValue(null);
+                          setSizePickerOpen(false);
+                          if (activeField) {
+                            updateField(activeField.id, { size });
+                          }
+                        }}
+                      >
+                        {size} pt
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="text-control-item mini color-picker">
+                <span className="label-title">Color</span>
+                <div className="compact-inline">
+                  <input
+                    type="color"
+                    value={displayedColorValue}
+                    onChange={(event) =>
+                      applyInlineCommandOrFieldUpdate({
+                        command: 'foreColor',
+                        value: event.target.value,
+                        fieldPatch: {
+                          color: hexToColorArray(event.target.value),
+                        },
+                        requireSelection: true,
+                        selectionMessage: 'Select text in the field to apply color.',
+                      })
+                    }
+                    style={{ width: '100%', padding: '2px' }}
+                  />
+                  <button
+                    type="button"
+                    className="font-picker-trigger size-trigger"
+                    onMouseDown={(event) => {
+                      const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                      if (editorEl) {
+                        event.preventDefault();
+                      }
+                    }}
+                    onClick={() => {
+                      setColorPickerOpen((prev) => !prev);
+                      setColorHoverValue('');
+                    }}
+                    style={{
+                      background: displayedColorValue,
+                      color: displayedColorValue.toLowerCase() === '#ffffff' ? '#111111' : '#ffffff',
+                    }}
+                    title={displayedColorValue}
+                  >
+                    ▾
+                  </button>
+                </div>
+                {colorPickerOpen && (
+                  <div
+                    className="font-picker-menu color-picker-menu"
+                    onMouseLeave={() => setColorHoverValue('')}
+                  >
+                    <div className="font-picker-group-title">Quick Colors</div>
+                    <div className="color-swatch-grid">
+                      {QUICK_COLOR_SWATCHES.map((hex) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className={`color-swatch ${displayedColorValue.toLowerCase() === hex.toLowerCase() ? 'active' : ''}`}
+                          style={{ background: hex }}
+                          onMouseDown={(event) => {
+                            const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                            if (editorEl) {
+                              event.preventDefault();
+                            }
+                          }}
+                          onMouseEnter={() => setColorHoverValue(hex)}
+                          onFocus={() => setColorHoverValue(hex)}
+                          onClick={() => {
+                            setColorHoverValue('');
+                            setColorPickerOpen(false);
+                            applyInlineCommandOrFieldUpdate({
+                              command: 'foreColor',
+                              value: hex,
+                              fieldPatch: {
+                                color: hexToColorArray(hex),
+                              },
+                              requireSelection: true,
+                              selectionMessage: 'Select text in the field to apply color.',
+                            });
+                          }}
+                          title={hex}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-            
-            <div className="text-control-item small">
-              <span className="label-title">Size (pt)</span>
-              <input
-                type="number"
-                value={activeField?.size ?? ''}
-                onChange={(event) => activeField && updateField(activeField.id, { size: Number(event.target.value) })}
-                placeholder="12"
-              />
-            </div>
-            
-            <div className="text-control-item mini">
-              <span className="label-title">Color</span>
-              <input
-                type="color"
-                value={activeField ? colorArrayToHex(activeField.color) : '#000000'}
-                onChange={(event) =>
-                  applyInlineCommandOrFieldUpdate({
-                    command: 'foreColor',
-                    value: event.target.value,
-                    fieldPatch: {
-                      color: hexToColorArray(event.target.value),
-                    },
-                    requireSelection: true,
-                    selectionMessage: 'Select text in the field to apply color.',
-                  })
-                }
-                style={{ width: '100%', padding: '2px' }}
-              />
-            </div>
-            
-            <span className="control-divider"></span>
-            
-            <div className="icon-buttons-group">
-              <button
-                type="button"
-                className={`icon-button ${activeField?.bold ? 'active' : ''}`}
-                onMouseDown={(event) => {
-                  const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                  if (editorEl) {
-                    event.preventDefault();
-                  }
-                }}
-                onClick={() => handleInlineStyleClick('bold', 'bold')}
-                title={isEditingText ? "Bold (select text first)" : "Bold"}
-              >
-                B
-              </button>
-              <button
-                type="button"
-                className={`icon-button ${activeField?.italic ? 'active' : ''}`}
-                onMouseDown={(event) => {
-                  const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                  if (editorEl) {
-                    event.preventDefault();
-                  }
-                }}
-                onClick={() => handleInlineStyleClick('italic', 'italic')}
-                title={isEditingText ? "Italic (select text first)" : "Italic"}
-                style={{ fontStyle: 'italic' }}
-              >
-                I
-              </button>
-            </div>
-            
-            <span className="control-divider"></span>
-            
-            <div className="text-control-item small">
-              <span className="label-title">Align</span>
-              <select
-                value={activeField?.align || 'left'}
-                onChange={(event) => activeField && updateField(activeField.id, { align: event.target.value })}
-              >
-                <option value="left">Left</option>
-                <option value="center">Center</option>
-                <option value="right">Right</option>
-              </select>
-            </div>
-            
-            <div className="text-control-item" style={{ marginLeft: '4px' }}>
-              <span className="label-title">Fit to box</span>
-              <label className="check-row" style={{ margin: 0 }}>
+
+            <div className="editing-row editing-row-secondary">
+              <div className="icon-buttons-group">
+                <button
+                  type="button"
+                  className={`icon-button ${activeField?.bold ? 'active' : ''}`}
+                  onMouseDown={(event) => {
+                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                    if (editorEl) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onClick={() => handleInlineStyleClick('bold', 'bold')}
+                  title={isEditingText ? 'Bold (select text first)' : 'Bold'}
+                >
+                  B
+                </button>
+                <button
+                  type="button"
+                  className={`icon-button ${activeField?.italic ? 'active' : ''}`}
+                  onMouseDown={(event) => {
+                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
+                    if (editorEl) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onClick={() => handleInlineStyleClick('italic', 'italic')}
+                  title={isEditingText ? 'Italic (select text first)' : 'Italic'}
+                  style={{ fontStyle: 'italic' }}
+                >
+                  I
+                </button>
+              </div>
+
+              <div className="text-control-item small compact-select">
+                <span className="label-title">Align</span>
+                <select
+                  value={activeField?.align || 'left'}
+                  onChange={(event) => activeField && updateField(activeField.id, { align: event.target.value })}
+                >
+                  <option value="left">Left</option>
+                  <option value="center">Center</option>
+                  <option value="right">Right</option>
+                </select>
+              </div>
+
+              <label className="compact-toggle">
                 <input
                   type="checkbox"
                   checked={activeField?.maxWidth || false}
                   onChange={(event) => activeField && updateField(activeField.id, { maxWidth: event.target.checked })}
                 />
+                <span>Fit</span>
               </label>
-            </div>
 
-            <div className="text-control-item" style={{ marginLeft: '4px' }}>
-              <span className="label-title">Wrap text</span>
-              <label className="check-row" style={{ margin: 0 }}>
+              <label className="compact-toggle">
                 <input
                   type="checkbox"
                   checked={activeField?.wrapText || false}
                   onChange={(event) => activeField && updateField(activeField.id, { wrapText: event.target.checked })}
                 />
+                <span>Wrap</span>
               </label>
             </div>
           </div>
@@ -2068,7 +3009,12 @@ export default function App() {
                     type="button"
                     key={field.id}
                     className={`field-row ${activeFieldId === field.id ? 'selected' : ''}`}
-                    onClick={() => setActiveFieldId(field.id)}
+                    onClick={() => {
+                      commitActiveEditingDraft();
+                      setIsEditingText(false);
+                      setActiveImageId(null);
+                      setActiveFieldId(field.id);
+                    }}
                   >
                     <span className="field-row-name">{field.name}</span>
                     <span className="field-row-meta">{field.align}</span>
@@ -2102,7 +3048,6 @@ export default function App() {
               onMouseDown={beginDraw}
               onMouseMove={moveDraw}
               onMouseUp={endDraw}
-              onMouseLeave={endDraw}
             >
               <img src={template.src} alt="Template" draggable={false} className="template-image" />
 
@@ -2111,9 +3056,16 @@ export default function App() {
                 const committedHtml = sampleHtmlValues[field.name];
                 const fallbackHtml = plainTextToHtml(sampleText);
                 const displayHtml = committedHtml ?? fallbackHtml;
-                const previewFontPx = (Number(field.size) / template.pageHeightPt) * template.displayHeight;
+                const isCsvMappedField = useCsv && Boolean(fieldMappings[field.name]);
+                const hoveredColorArray = colorHoverValue ? hexToColorArray(colorHoverValue) : field.color;
+                const previewSizePt = activeFieldId === field.id && sizeHoverValue ? Number(sizeHoverValue) : Number(field.size);
+                const previewFontPx = (previewSizePt / template.pageHeightPt) * template.displayHeight;
                 const fittedPx = field.maxWidth ? fitSizeForPreview(sampleText, field.w, previewFontPx) : previewFontPx;
                 const isActive = activeFieldId === field.id;
+                const isInlineEditing = isActive && isEditingText && !isCsvMappedField;
+                const previewFontToken = isActive && fontHoverFamily ? fontHoverFamily : field.font;
+                const previewFontCss = resolveFontTokenToCss(previewFontToken);
+                const previewColor = isActive ? hoveredColorArray : field.color;
 
                 return (
                   <div
@@ -2133,7 +3085,17 @@ export default function App() {
                       const previewEl = target.closest('.field-preview');
                       if (previewEl) {
                         event.stopPropagation();
+                        if (isEditingText && activeFieldId && activeFieldId !== field.id) {
+                          commitActiveEditingDraft();
+                        }
                         setActiveFieldId(field.id);
+                        setActiveImageId(null);
+
+                        if (isCsvMappedField) {
+                          setIsEditingText(false);
+                          setStatus(`"${field.name}" is mapped to CSV column "${fieldMappings[field.name]}" and is read-only.`);
+                          return;
+                        }
 
                         const isSameEditingField =
                           isEditingText && editingDraftRef.current.name === field.name;
@@ -2166,7 +3128,9 @@ export default function App() {
                         return;
                       }
                       if (!target.closest('.field-preview') && !target.closest('.resize-handle')) {
+                        commitActiveEditingDraft();
                         setActiveFieldId(field.id);
+                        setActiveImageId(null);
                         setIsEditingText(false);
                       }
                     }}
@@ -2182,45 +3146,48 @@ export default function App() {
                   >
                     <div
                       className={`field-preview align-${field.align}`}
-                      contentEditable={isActive && isEditingText}
+                      contentEditable={isInlineEditing}
                       suppressContentEditableWarning={true}
                       spellCheck={false}
+                      ref={(node) => {
+                        if (!node || !isInlineEditing) {
+                          return;
+                        }
+                        const expectedName = editingDraftRef.current.name === field.name
+                          ? editingDraftRef.current.name
+                          : null;
+                        if (!expectedName) {
+                          return;
+                        }
+                        const shouldSeed =
+                          node.dataset.editingField !== expectedName ||
+                          !node.innerHTML ||
+                          node.innerHTML === '<br>';
+                        if (shouldSeed) {
+                          node.innerHTML = editingDraftRef.current.html ?? displayHtml;
+                          node.dataset.editingField = expectedName;
+                        }
+                      }}
                       style={{
                         fontSize: fittedPx,
-                        fontFamily: field.font,
-                        color: colorArrayToCss(field.color),
-                        fontWeight: field.bold ? 'bold' : 'normal',
-                        fontStyle: field.italic ? 'italic' : 'normal',
+                        fontFamily: previewFontCss.family || previewFontToken,
+                        color: colorArrayToCss(previewColor),
+                        fontWeight: field.bold ? 'bold' : (previewFontCss.weight || 'normal'),
+                        fontStyle: field.italic ? 'italic' : (previewFontCss.style || 'normal'),
                         whiteSpace: field.wrapText ? 'pre-wrap' : 'pre',
                         overflowWrap: field.wrapText ? 'break-word' : 'normal',
                         wordWrap: field.wrapText ? 'break-word' : 'normal',
+                        cursor: isCsvMappedField ? 'default' : 'text',
                       }}
                       onInput={(event) => {
-                        if (isActive && isEditingText) {
+                        if (isInlineEditing) {
+                          const nextText = event.currentTarget.innerText;
+                          const nextHtml = sanitizeHtml(event.currentTarget.innerHTML);
                           editingDraftRef.current = {
                             name: field.name,
-                            html: event.currentTarget.innerHTML,
-                            text: event.currentTarget.innerText,
+                            html: nextHtml,
+                            text: nextText,
                           };
-                        }
-                      }}
-                      onMouseDown={(event) => {
-                        // When in edit mode, stop propagation to allow text selection
-                        if (isActive && isEditingText) {
-                          event.stopPropagation();
-                        }
-                      }}
-                      onBlur={(event) => {
-                        const nextTarget = event.relatedTarget;
-                        const keepEditing =
-                          nextTarget instanceof HTMLElement &&
-                          !!nextTarget.closest('.topbar-editing-controls');
-                        if (keepEditing) {
-                          return;
-                        }
-                        if (editingDraftRef.current.name === field.name) {
-                          const nextText = editingDraftRef.current.text ?? '';
-                          const nextHtml = sanitizeHtml(editingDraftRef.current.html ?? plainTextToHtml(nextText));
                           setSampleValues((prev) => ({
                             ...prev,
                             [field.name]: nextText,
@@ -2230,15 +3197,62 @@ export default function App() {
                             [field.name]: nextHtml,
                           }));
                         }
+                      }}
+                      onMouseDown={(event) => {
+                        // When in edit mode, stop propagation to allow text selection
+                        if (isActive && isEditingText) {
+                          event.stopPropagation();
+                        }
+                      }}
+                      onMouseUp={(event) => {
+                        if (!(isActive && isEditingText)) {
+                          return;
+                        }
+                        const selection = window.getSelection();
+                        if (
+                          selection &&
+                          !selection.isCollapsed &&
+                          selection.rangeCount > 0 &&
+                          selectionInsideEditor(event.currentTarget, selection)
+                        ) {
+                          lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+                        }
+                      }}
+                      onKeyUp={(event) => {
+                        if (!(isActive && isEditingText)) {
+                          return;
+                        }
+                        const selection = window.getSelection();
+                        if (
+                          selection &&
+                          !selection.isCollapsed &&
+                          selection.rangeCount > 0 &&
+                          selectionInsideEditor(event.currentTarget, selection)
+                        ) {
+                          lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+                        }
+                      }}
+                      onBlur={(event) => {
+                        const nextTarget = event.relatedTarget;
+                        const activeElement = document.activeElement;
+                        const keepEditingByToolbarFocus =
+                          nextTarget instanceof HTMLElement &&
+                          !!nextTarget.closest('.topbar-editing-controls');
+                        const keepEditingByActiveElement =
+                          activeElement instanceof HTMLElement &&
+                          !!activeElement.closest('.topbar-editing-controls');
+                        const keepEditing =
+                          toolbarInteractionRef.current ||
+                          keepEditingByToolbarFocus ||
+                          keepEditingByActiveElement;
+                        if (keepEditing) {
+                          return;
+                        }
+                        commitFieldDraft(field.name);
                         lastSelectionRangeRef.current = null;
                         setIsEditingText(false);
                       }}
-                      dangerouslySetInnerHTML={{
-                        __html:
-                          isActive && isEditingText && editingDraftRef.current.name === field.name
-                            ? editingDraftRef.current.html
-                            : displayHtml,
-                      }}
+                      dangerouslySetInnerHTML={isInlineEditing ? undefined : { __html: displayHtml }}
                     >
                       {null}
                     </div>
@@ -2251,6 +3265,44 @@ export default function App() {
                     <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, field.id, 's')} />
                     <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, field.id, 'sw')} />
                     <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, field.id, 'w')} />
+                  </div>
+                );
+              })}
+
+              {imageItems.map((image) => {
+                const isActiveImage = activeImageId === image.id;
+                return (
+                  <div
+                    key={image.id}
+                    className={`field-box image-box ${isActiveImage ? 'active' : ''}`}
+                    style={{ left: image.x, top: image.y, width: image.w, height: image.h }}
+                    onMouseDown={(event) => {
+                      const target = event.target;
+                      if (!(target instanceof HTMLElement)) {
+                        return;
+                      }
+                      if (target.closest('.resize-handle')) {
+                        return;
+                      }
+                      beginMove(event, image.id, 'image');
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      commitActiveEditingDraft();
+                      setActiveImageId(image.id);
+                      setActiveFieldId(null);
+                      setIsEditingText(false);
+                    }}
+                  >
+                    <img src={image.src} alt={image.name || 'Layout image'} className="image-preview" draggable={false} />
+                    <span className="resize-handle resize-handle-nw" onMouseDown={(event) => beginResize(event, image.id, 'nw', 'image')} />
+                    <span className="resize-handle resize-handle-n" onMouseDown={(event) => beginResize(event, image.id, 'n', 'image')} />
+                    <span className="resize-handle resize-handle-ne" onMouseDown={(event) => beginResize(event, image.id, 'ne', 'image')} />
+                    <span className="resize-handle resize-handle-e" onMouseDown={(event) => beginResize(event, image.id, 'e', 'image')} />
+                    <span className="resize-handle resize-handle-se" onMouseDown={(event) => beginResize(event, image.id, 'se', 'image')} />
+                    <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, image.id, 's', 'image')} />
+                    <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, image.id, 'sw', 'image')} />
+                    <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, image.id, 'w', 'image')} />
                   </div>
                 );
               })}
@@ -2404,7 +3456,11 @@ export default function App() {
                   <span className="label-title">Preview value</span>
                   <textarea
                     value={sampleValues[activeField.name] ?? ''}
+                    disabled={activeFieldIsCsvMapped}
                     onChange={(event) => {
+                      if (activeFieldIsCsvMapped) {
+                        return;
+                      }
                       const nextValue = event.target.value;
                       setSampleValues((prev) => ({
                         ...prev,
@@ -2429,9 +3485,12 @@ export default function App() {
                       }
                     }}
                     rows={3}
-                    placeholder="Enter preview text (press Enter for new line)"
+                    placeholder={activeFieldIsCsvMapped ? 'This field is mapped to CSV and is read-only' : 'Enter preview text (press Enter for new line)'}
                   />
                 </label>
+                {activeFieldIsCsvMapped && (
+                  <p className="hint">Mapped to CSV column: {fieldMappings[activeField.name]}</p>
+                )}
 
                 <div className="grid-two">
                   <label>
@@ -2494,6 +3553,61 @@ export default function App() {
 
                 <button type="button" className="danger" onClick={() => deleteField(activeField.id)}>
                   Delete field
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeImage && template && scales && (
+            <div className={`panel ${panelState.selectedField ? '' : 'collapsed'}`}>
+              <div className="panel-header">
+                <h2>Selected image</h2>
+              </div>
+              <div className="panel-body editor">
+                <label>
+                  <span className="label-title">Name</span>
+                  <input
+                    value={activeImage.name || ''}
+                    onChange={(event) => updateImage(activeImage.id, { name: event.target.value })}
+                  />
+                </label>
+                <div className="grid-two">
+                  <label>
+                    <span className="label-title">X (px)</span>
+                    <input
+                      type="number"
+                      value={Math.round(activeImage.x)}
+                      onChange={(event) => updateImage(activeImage.id, { x: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span className="label-title">Y (px)</span>
+                    <input
+                      type="number"
+                      value={Math.round(activeImage.y)}
+                      onChange={(event) => updateImage(activeImage.id, { y: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span className="label-title">W (px)</span>
+                    <input
+                      type="number"
+                      value={Math.round(activeImage.w)}
+                      onChange={(event) => updateImage(activeImage.id, { w: Number(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span className="label-title">H (px)</span>
+                    <input
+                      type="number"
+                      value={Math.round(activeImage.h)}
+                      onChange={(event) => updateImage(activeImage.id, { h: Number(event.target.value) })}
+                    />
+                  </label>
+                </div>
+
+                <button type="button" className="danger" onClick={() => deleteImage(activeImage.id)}>
+                  Delete image
                 </button>
               </div>
             </div>
