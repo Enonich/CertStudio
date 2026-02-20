@@ -169,6 +169,12 @@ const QUICK_COLOR_SWATCHES = [
   '#1f9fff', '#0d6efd', '#6f42c1', '#e83e8c', '#ff6b6b', '#ffa94d', '#74c0fc',
 ];
 
+const MAX_HISTORY_STEPS = 100;
+
+function cloneHistoryValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -360,6 +366,7 @@ export default function App() {
   const [layoutsMenuOpen, setLayoutsMenuOpen] = useState(false);
   const [generateMenuOpen, setGenerateMenuOpen] = useState(false);
   const [fontMenuOpen, setFontMenuOpen] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [generateOptions, setGenerateOptions] = useState({
     row: 0,
     output_mode: 'full_pdf',
@@ -369,6 +376,11 @@ export default function App() {
     page_size: 'letter',
     generate_all: false,
   });
+  const undoStackRef = useRef([]);
+  const redoStackRef = useRef([]);
+  const historyCurrentRef = useRef(null);
+  const historySignatureRef = useRef(null);
+  const isApplyingHistoryRef = useRef(false);
 
   const pageSize = useMemo(() => {
     if (preset === 'custom') {
@@ -385,6 +397,116 @@ export default function App() {
 
   const activeField = fields.find((field) => field.id === activeFieldId) ?? null;
   const activeImage = imageItems.find((image) => image.id === activeImageId) ?? null;
+
+  const buildHistorySnapshot = () => ({
+    fields: cloneHistoryValue(fields),
+    imageItems: cloneHistoryValue(imageItems),
+    sampleValues: cloneHistoryValue(sampleValues),
+    sampleHtmlValues: cloneHistoryValue(sampleHtmlValues),
+    fieldMappings: cloneHistoryValue(fieldMappings),
+    useCsv,
+    generateOptions: cloneHistoryValue(generateOptions),
+    activeFieldId,
+    activeImageId,
+    isEditingText,
+  });
+
+  const applyHistorySnapshot = (snapshot) => {
+    const safeSnapshot = cloneHistoryValue(snapshot);
+    isApplyingHistoryRef.current = true;
+    historyCurrentRef.current = safeSnapshot;
+    historySignatureRef.current = JSON.stringify(safeSnapshot);
+
+    setFields(safeSnapshot.fields ?? []);
+    setImageItems(safeSnapshot.imageItems ?? []);
+    setSampleValues(safeSnapshot.sampleValues ?? {});
+    setSampleHtmlValues(safeSnapshot.sampleHtmlValues ?? {});
+    setFieldMappings(safeSnapshot.fieldMappings ?? {});
+    setUseCsv(Boolean(safeSnapshot.useCsv));
+    setGenerateOptions((prev) => ({ ...prev, ...(safeSnapshot.generateOptions ?? {}) }));
+    setActiveFieldId(safeSnapshot.activeFieldId ?? null);
+    setActiveImageId(safeSnapshot.activeImageId ?? null);
+    setIsEditingText(Boolean(safeSnapshot.isEditingText));
+
+    setTimeout(() => {
+      isApplyingHistoryRef.current = false;
+    }, 0);
+  };
+
+  const performUndo = () => {
+    if (undoStackRef.current.length === 0) {
+      return false;
+    }
+
+    const previousSnapshot = undoStackRef.current.pop();
+    const currentSnapshot = buildHistorySnapshot();
+    redoStackRef.current.push(currentSnapshot);
+    if (redoStackRef.current.length > MAX_HISTORY_STEPS) {
+      redoStackRef.current.shift();
+    }
+
+    applyHistorySnapshot(previousSnapshot);
+    return true;
+  };
+
+  const performRedo = () => {
+    if (redoStackRef.current.length === 0) {
+      return false;
+    }
+
+    const nextSnapshot = redoStackRef.current.pop();
+    const currentSnapshot = buildHistorySnapshot();
+    undoStackRef.current.push(currentSnapshot);
+    if (undoStackRef.current.length > MAX_HISTORY_STEPS) {
+      undoStackRef.current.shift();
+    }
+
+    applyHistorySnapshot(nextSnapshot);
+    return true;
+  };
+
+  useEffect(() => {
+    const snapshot = buildHistorySnapshot();
+    const signature = JSON.stringify(snapshot);
+
+    if (historySignatureRef.current === null) {
+      historyCurrentRef.current = snapshot;
+      historySignatureRef.current = signature;
+      return;
+    }
+
+    if (signature === historySignatureRef.current) {
+      return;
+    }
+
+    if (isApplyingHistoryRef.current) {
+      historyCurrentRef.current = snapshot;
+      historySignatureRef.current = signature;
+      return;
+    }
+
+    if (historyCurrentRef.current) {
+      undoStackRef.current.push(historyCurrentRef.current);
+      if (undoStackRef.current.length > MAX_HISTORY_STEPS) {
+        undoStackRef.current.shift();
+      }
+    }
+    redoStackRef.current = [];
+    historyCurrentRef.current = snapshot;
+    historySignatureRef.current = signature;
+  }, [
+    fields,
+    imageItems,
+    sampleValues,
+    sampleHtmlValues,
+    fieldMappings,
+    useCsv,
+    generateOptions,
+    activeFieldId,
+    activeImageId,
+    isEditingText,
+  ]);
+
   const availableFontValues = useMemo(
     () => new Set([
       ...REPORTLAB_BASE14_FONTS.map((f) => f.value),
@@ -1472,6 +1594,19 @@ export default function App() {
 
       if (modKey && !event.altKey) {
         const key = event.key.toLowerCase();
+        const wantsUndo = key === 'z' && !event.shiftKey;
+        const wantsRedo = key === 'y' || (key === 'z' && event.shiftKey);
+        if (wantsUndo || wantsRedo) {
+          if (typingSurface) {
+            return;
+          }
+          event.preventDefault();
+          const didApply = wantsUndo ? performUndo() : performRedo();
+          if (!didApply) {
+            setStatus(wantsUndo ? 'Nothing to undo.' : 'Nothing to redo.');
+          }
+          return;
+        }
         if (key === 'b') {
           if (activeField) {
             event.preventDefault();
@@ -1567,6 +1702,8 @@ export default function App() {
     activeImage,
     activeFieldId,
     activeImageId,
+    performUndo,
+    performRedo,
     applyInlineCommandOrFieldUpdate,
     handleInlineStyleClick,
   ]);
@@ -2001,7 +2138,12 @@ export default function App() {
       setFieldMappings({});
       setUseCsv(false);
     }
-    setStatus(`Loaded ${targetName} from backend.`);
+    const loadedWithCsvMode = Boolean(next.layoutState?.use_csv);
+    if (loadedWithCsvMode && !csvFile) {
+      setStatus(`Loaded ${targetName} from backend. This layout uses CSV mode—upload a CSV file before generating, or turn off Use CSV.`);
+    } else {
+      setStatus(`Loaded ${targetName} from backend.`);
+    }
   };
 
   const loadFromFile = async (event) => {
@@ -2035,7 +2177,12 @@ export default function App() {
         setFieldMappings({});
         setUseCsv(false);
       }
-      setStatus(`Loaded ${file.name} from disk.`);
+      const loadedWithCsvMode = Boolean(next.layoutState?.use_csv);
+      if (loadedWithCsvMode && !csvFile) {
+        setStatus(`Loaded ${file.name} from disk. This layout uses CSV mode—upload a CSV file before generating, or turn off Use CSV.`);
+      } else {
+        setStatus(`Loaded ${file.name} from disk.`);
+      }
     } catch (error) {
       setStatus(`Failed to load fields file: ${error}`);
     }
@@ -2075,166 +2222,175 @@ export default function App() {
   };
 
   const generatePdf = async () => {
-    if (!templateFile) {
-      setStatus('Upload a template first.');
+    if (isGenerating) {
       return;
     }
-    const fieldsPayload = buildPayload();
-    if (!fieldsPayload) {
-      setStatus('Create fields before generating a PDF.');
-      return;
-    }
-    if (useCsv && !csvFile) {
-      setStatus('Upload a CSV file or turn off CSV mode.');
-      return;
-    }
-    const payload = {
-      ...generateOptions,
-      row: Number(generateOptions.row) || 0,
-      dx: Number(generateOptions.dx) || 0,
-      dy: Number(generateOptions.dy) || 0,
-      grid_step: Number(generateOptions.grid_step) || 0,
-      placeholder_mode: false,
-      overlay_only: generateOptions.output_mode === 'overlay_only',
-    };
-    const formData = new FormData();
-    formData.append('template', templateFile);
-    formData.append('fields_json', JSON.stringify(fieldsPayload));
-    formData.append('row', String(payload.row));
-    formData.append('page_size', payload.page_size);
-    formData.append('dx', String(payload.dx));
-    formData.append('dy', String(payload.dy));
-    formData.append('grid_step', String(payload.grid_step));
-    formData.append('placeholder_mode', String(useCsv ? false : false));
-    formData.append('overlay_only', String(payload.overlay_only));
-    
-    if (useCsv) {
-      formData.append('csv_file', csvFile);
-      
-      // Send field mappings (which fields map to which CSV columns)
-      const cleanedMappings = {};
-      Object.entries(fieldMappings).forEach(([fieldName, csvColumn]) => {
-        if (csvColumn) {
-          cleanedMappings[fieldName] = csvColumn;
-        }
-      });
-      formData.append('field_mappings_json', JSON.stringify(cleanedMappings));
-      
-      // Send fixed values for fields that are NOT mapped to CSV
-      const fixedValues = {};
-      fields.forEach((field) => {
-        if (!fieldMappings[field.name]) {
-          const { text, html } = getFieldValuePayload(field.name);
-          if (text) {
-            fixedValues[field.name] = { text, html };
-          }
-        }
-      });
-      formData.append('fixed_values_json', JSON.stringify(fixedValues));
-      
-      // Enable batch generation if user selected "generate all"
-      formData.append('batch', String(generateOptions.generate_all));
-    } else {
-      formData.append('data_json', JSON.stringify(buildDataPayload()));
-    }
-    
-    let response;
-    try {
-      response = await fetch('/api/generate-file-upload', {
-        method: 'POST',
-        body: formData,
-      });
-    } catch (error) {
-      setStatus(`Failed to reach server: ${error}`);
-      return;
-    }
-    if (!response.ok) {
-      let detail = '';
-      const contentType = response.headers.get('content-type') || '';
-      try {
-        if (contentType.includes('application/json')) {
-          const data = await response.json();
-          detail = formatErrorDetail(data?.detail ?? data);
-        } else {
-          detail = await response.text();
-        }
-      } catch (error) {
-        detail = `HTTP ${response.status}`;
-      }
-      const suffix = detail ? ` ${detail}` : '';
-      setStatus(`Failed to generate PDF. HTTP ${response.status}.${suffix}`);
-      return;
-    }
-    const responseForText = response.clone();
-    const contentType = response.headers.get('content-type') || 'n/a';
-    const contentDisposition = response.headers.get('content-disposition') || '';
-    const buffer = await response.arrayBuffer();
-    if (!buffer || buffer.byteLength === 0) {
-      let detail = '';
-      try {
-        detail = await responseForText.text();
-      } catch (error) {
-        detail = '';
-      }
-      const contentLength = response.headers.get('content-length') || 'n/a';
-      const suffix = detail ? ` ${detail}` : '';
-      setStatus(
-        `Generated file is empty. HTTP ${response.status} content-length=${contentLength} content-type=${contentType}.${suffix}`
-      );
-      return;
-    }
-    
-    const isZipResponse =
-      contentType.includes('application/zip') ||
-      contentType.includes('application/x-zip-compressed') ||
-      /\.zip/i.test(contentDisposition);
 
-    // Handle batch ZIP download
-    if (useCsv && generateOptions.generate_all && isZipResponse) {
-      const blob = new Blob([buffer], { type: 'application/zip' });
-      const url = URL.createObjectURL(blob);
-      const filename = getFilenameFromContentDisposition(contentDisposition, 'certificates.zip');
+    try {
+      setIsGenerating(true);
+      setStatus('Generating...');
+
+      if (!templateFile) {
+        setStatus('Upload a template first.');
+        return;
+      }
+      const fieldsPayload = buildPayload();
+      if (!fieldsPayload) {
+        setStatus('Create fields before generating a PDF.');
+        return;
+      }
+      if (useCsv && !csvFile) {
+        setPanelState((prev) => ({ ...prev, dataSource: true }));
+        setStatus('This layout is in CSV mode. Upload a CSV file in Data source, or turn off Use CSV, then generate again.');
+        return;
+      }
+
+      const payload = {
+        ...generateOptions,
+        row: Number(generateOptions.row) || 0,
+        dx: Number(generateOptions.dx) || 0,
+        dy: Number(generateOptions.dy) || 0,
+        grid_step: Number(generateOptions.grid_step) || 0,
+        placeholder_mode: false,
+        overlay_only: generateOptions.output_mode === 'overlay_only',
+      };
+      const formData = new FormData();
+      formData.append('template', templateFile);
+      formData.append('fields_json', JSON.stringify(fieldsPayload));
+      formData.append('row', String(payload.row));
+      formData.append('page_size', payload.page_size);
+      formData.append('dx', String(payload.dx));
+      formData.append('dy', String(payload.dy));
+      formData.append('grid_step', String(payload.grid_step));
+      formData.append('placeholder_mode', String(false));
+      formData.append('overlay_only', String(payload.overlay_only));
+
+      if (useCsv) {
+        formData.append('csv_file', csvFile);
+
+        const cleanedMappings = {};
+        Object.entries(fieldMappings).forEach(([fieldName, csvColumn]) => {
+          if (csvColumn) {
+            cleanedMappings[fieldName] = csvColumn;
+          }
+        });
+        formData.append('field_mappings_json', JSON.stringify(cleanedMappings));
+
+        const fixedValues = {};
+        fields.forEach((field) => {
+          if (!fieldMappings[field.name]) {
+            const { text, html } = getFieldValuePayload(field.name);
+            if (text) {
+              fixedValues[field.name] = { text, html };
+            }
+          }
+        });
+        formData.append('fixed_values_json', JSON.stringify(fixedValues));
+        formData.append('batch', String(generateOptions.generate_all));
+      } else {
+        formData.append('data_json', JSON.stringify(buildDataPayload()));
+      }
+
+      let response;
+      try {
+        response = await fetch('/api/generate-file-upload', {
+          method: 'POST',
+          body: formData,
+        });
+      } catch (error) {
+        setStatus(`Failed to reach server: ${error}`);
+        return;
+      }
+      if (!response.ok) {
+        let detail = '';
+        const contentType = response.headers.get('content-type') || '';
+        try {
+          if (contentType.includes('application/json')) {
+            const data = await response.json();
+            detail = formatErrorDetail(data?.detail ?? data);
+          } else {
+            detail = await response.text();
+          }
+        } catch (error) {
+          detail = `HTTP ${response.status}`;
+        }
+        const suffix = detail ? ` ${detail}` : '';
+        setStatus(`Failed to generate PDF. HTTP ${response.status}.${suffix}`);
+        return;
+      }
+      const responseForText = response.clone();
+      const contentType = response.headers.get('content-type') || 'n/a';
+      const contentDisposition = response.headers.get('content-disposition') || '';
+      const buffer = await response.arrayBuffer();
+      if (!buffer || buffer.byteLength === 0) {
+        let detail = '';
+        try {
+          detail = await responseForText.text();
+        } catch (error) {
+          detail = '';
+        }
+        const contentLength = response.headers.get('content-length') || 'n/a';
+        const suffix = detail ? ` ${detail}` : '';
+        setStatus(
+          `Generated file is empty. HTTP ${response.status} content-length=${contentLength} content-type=${contentType}.${suffix}`
+        );
+        return;
+      }
+
+      const isZipResponse =
+        contentType.includes('application/zip') ||
+        contentType.includes('application/x-zip-compressed') ||
+        /\.zip/i.test(contentDisposition);
+
+      if (useCsv && generateOptions.generate_all && isZipResponse) {
+        const blob = new Blob([buffer], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const filename = getFilenameFromContentDisposition(contentDisposition, 'certificates.zip');
+        if (latestDownload?.url) {
+          URL.revokeObjectURL(latestDownload.url);
+        }
+        setLatestDownload({ url, filename, kind: 'zip' });
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setStatus('Downloaded ZIP file containing all certificates.');
+        return;
+      }
+
+      if (!contentType.includes('application/pdf')) {
+        let detail = '';
+        try {
+          detail = await responseForText.text();
+        } catch (error) {
+          detail = '';
+        }
+        const suffix = detail ? ` ${detail}` : '';
+        setStatus(`Unexpected response type: ${contentType}. ${suffix}`);
+        return;
+      }
+      const blob = new Blob([buffer], { type: 'application/pdf' });
+      const downloadUrl = URL.createObjectURL(blob);
       if (latestDownload?.url) {
         URL.revokeObjectURL(latestDownload.url);
       }
-      setLatestDownload({ url, filename, kind: 'zip' });
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setStatus('Downloaded ZIP file containing all certificates.');
-      return;
-    }
-    
-    // Handle single PDF preview
-    if (!contentType.includes('application/pdf')) {
-      let detail = '';
-      try {
-        detail = await responseForText.text();
-      } catch (error) {
-        detail = '';
-      }
-      const suffix = detail ? ` ${detail}` : '';
-      setStatus(`Unexpected response type: ${contentType}. ${suffix}`);
-      return;
-    }
-    const blob = new Blob([buffer], { type: 'application/pdf' });
-    const downloadUrl = URL.createObjectURL(blob);
-    if (latestDownload?.url) {
-      URL.revokeObjectURL(latestDownload.url);
-    }
-    setLatestDownload({ url: downloadUrl, filename: 'certificate.pdf', kind: 'pdf' });
+      setLatestDownload({ url: downloadUrl, filename: 'certificate.pdf', kind: 'pdf' });
 
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      setPanelState((prev) => ({ ...prev, preview: true }));
+
+      setStatus('Generated PDF preview. Use Download PDF to save it.');
+    } catch (error) {
+      setStatus(`Generation failed unexpectedly: ${error?.message || error}`);
+    } finally {
+      setIsGenerating(false);
     }
-    const url = URL.createObjectURL(blob);
-    setPreviewUrl(url);
-    setPanelState((prev) => ({ ...prev, preview: true }));
-    
-    setStatus('Generated PDF preview. Use Download PDF to save it.');
   };
 
   const downloadLatestFile = () => {
@@ -2416,8 +2572,8 @@ export default function App() {
                     </label>
                   )}
                   <div className="button-row">
-                    <button type="button" onClick={generatePdf} className="primary-button">
-                      Generate PDF
+                    <button type="button" onClick={generatePdf} className="primary-button" disabled={isGenerating}>
+                      {isGenerating ? 'Generating…' : 'Generate PDF'}
                     </button>
                     <button type="button" onClick={downloadLatestFile} disabled={!latestDownload?.url}>
                       {latestDownload?.kind === 'zip' ? 'Download ZIP' : 'Download PDF'}

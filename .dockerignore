@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Node
+node_modules/
+template-mapper-app/node_modules/
+template-mapper-app/dist/
+
+# Build/output
+out/
+*.log
+
+# Git/editor
+.git/
+.gitignore
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data
+*.pdf
+*.zip
