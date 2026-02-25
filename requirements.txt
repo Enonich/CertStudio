@@ -3,3 +3,10 @@ reportlab
 pymupdf
 fastapi
 uvicorn
+python-multipart
+aiofiles
+PyJWT[crypto]
+python-dotenv
+pytest
+pytest-asyncio
+httpx

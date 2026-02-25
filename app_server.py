@@ -7,13 +7,19 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+# load_dotenv() MUST be called before importing auth so that SUPABASE_URL and
+# SUPABASE_JWT_SECRET are in os.environ when auth.py reads them at import time.
+from dotenv import load_dotenv
+load_dotenv()
+
+import jwt as pyjwt
+from auth import decode_supabase_token
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
 
 ROOT_DIR = Path(__file__).resolve().parent
 FIELDS_FILE = ROOT_DIR / "fields.json"
@@ -21,6 +27,65 @@ FIELDS_STORE = ROOT_DIR / "fields_store"
 FRONTEND_DIST = ROOT_DIR / "template-mapper-app" / "dist"
 
 app = FastAPI(title="Certificate Mapper API")
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Allow the Vite dev server to reach the API during development.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── AUTH MIDDLEWARE ────────────────────────────────────────────────────────────
+_SUPABASE_JWT_SECRET: str = os.environ.get("SUPABASE_JWT_SECRET", "")
+# Exact-match public paths
+_PUBLIC_API_PATHS: frozenset[str] = frozenset({
+    "/api/health",
+    "/api/list-custom-fonts",  # needed by the font picker before CSS injection
+})
+# Prefix-match public paths — browser fetches these directly (CSS @font-face, etc.)
+_PUBLIC_API_PREFIXES: tuple[str, ...] = ("/api/font-file/",)
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """Reject unauthenticated calls to /api/* (except public endpoints)."""
+    path = request.url.path
+    # Pass through: non-API paths, public exact paths, public prefixes, CORS preflight
+    if (
+        not path.startswith("/api/")
+        or path in _PUBLIC_API_PATHS
+        or any(path.startswith(p) for p in _PUBLIC_API_PREFIXES)
+        or request.method == "OPTIONS"
+    ):
+        return await call_next(request)
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Missing or invalid Authorization header."},
+        )
+
+    token = auth_header.split(" ", 1)[1]
+    try:
+        decode_supabase_token(token)
+    except pyjwt.ExpiredSignatureError:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Token has expired."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except pyjwt.InvalidTokenError as exc:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": f"Invalid token: {exc}"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)

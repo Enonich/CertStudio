@@ -3,10 +3,8 @@ title: CertStudio Certificate Generator
 emoji: 📄
 colorFrom: blue
 colorTo: indigo
-sdk: streamlit
-sdk_version: "1.41.1"
-python_version: "3.11"
-app_file: app.py
+sdk: docker
+app_port: 7860
 pinned: false
 ---
 
@@ -23,11 +21,40 @@ It supports single-certificate generation and CSV batch generation (ZIP), custom
 ## Current Architecture
 
 - Frontend: React + Vite (`template-mapper-app`)
-- Backend: FastAPI (`app.py`)
+- Backend: FastAPI (`app_server.py`, entrypoint `app.py`)
+- Auth: JWT verification via Supabase (`auth.py`)
 - PDF engine: ReportLab + pypdf (`certificate_overlay.py`)
 - Optional PDF inspection: PyMuPDF (`extract_template_coords.py` and extraction endpoints)
 
 Coordinates use PDF points (`72 pt = 1 inch`) with bottom-left origin.
+
+All `/api/*` routes (except `/api/health`, `/api/list-custom-fonts`, and `/api/font-file/*`) require a valid Supabase JWT in the `Authorization: Bearer <token>` header.
+
+## Environment Variables
+
+**Backend** — create a `.env` file in the project root (never commit it):
+
+```env
+# Required – Supabase Project Settings → API → JWT Settings → JWT Secret
+SUPABASE_JWT_SECRET=your_supabase_jwt_secret
+
+# Required when Supabase issues RS256-signed tokens (needed for JWKS lookup)
+SUPABASE_URL=https://<project>.supabase.co
+```
+
+**Frontend** — create `template-mapper-app/.env.local` (never commit it):
+
+```env
+# Supabase Project Settings → API → Project URL
+VITE_SUPABASE_URL=https://<project>.supabase.co
+
+# Supabase Project Settings → API → anon / public key
+VITE_SUPABASE_ANON_KEY=your_anon_key
+```
+
+These are baked into the JS bundle at build time by Vite. If either is missing, the app throws on load.
+
+If `SUPABASE_JWT_SECRET` is not set, all authenticated API calls will be rejected with `401`.
 
 ## Quick Start (Local)
 
@@ -39,7 +66,11 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2) Frontend build
+### 2) Configure environment
+
+Create `.env` in the project root with your backend Supabase credentials, and `template-mapper-app/.env.local` with your frontend Vite vars (see **Environment Variables** section above).
+
+### 3) Frontend build
 
 ```powershell
 cd template-mapper-app
@@ -48,7 +79,7 @@ npm run build
 cd ..
 ```
 
-### 3) Run server
+### 4) Run server
 
 ```powershell
 uvicorn app:app --reload
@@ -75,9 +106,16 @@ If frontend assets are missing, `/` returns a `503` message with build instructi
 
 ## API Endpoints
 
-Core:
+Public (no auth required):
 
 - `GET /api/health`
+- `GET /api/list-custom-fonts`
+- `GET /api/font-file/{filename}`
+
+Authenticated (require `Authorization: Bearer <supabase_jwt>`):
+
+Core:
+
 - `GET /api/fields/list`
 - `GET /api/fields?name=<layout.json>`
 - `POST /api/fields?name=<layout.json>`
@@ -88,8 +126,6 @@ Core:
 Fonts:
 
 - `POST /api/extract-fonts`
-- `GET /api/list-custom-fonts`
-- `GET /api/font-file/{filename}`
 - `POST /api/upload-font`
 - `DELETE /api/delete-font/{filename}`
 
@@ -191,9 +227,24 @@ python extract_template_coords.py `
 
 This repo includes a multi-stage Docker build that compiles the frontend and runs FastAPI.
 
+The Supabase public keys must be passed as build args because Vite bakes `VITE_*` variables into the JS bundle at compile time:
+
 ```powershell
-docker build -t certstudio .
-docker run --rm -p 7860:7860 certstudio
+docker build -t certstudio `
+  --build-arg VITE_SUPABASE_URL=https://<project>.supabase.co `
+  --build-arg VITE_SUPABASE_ANON_KEY=your_anon_key `
+  .
+
+docker run --rm -p 7860:7860 `
+  -e SUPABASE_JWT_SECRET=your_secret `
+  -e SUPABASE_URL=https://<project>.supabase.co `
+  certstudio
+```
+
+Or pass back-end secrets via `--env-file`:
+
+```powershell
+docker run --rm -p 7860:7860 --env-file .env certstudio
 ```
 
 Open: `http://127.0.0.1:7860`

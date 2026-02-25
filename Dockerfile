@@ -3,6 +3,13 @@
 FROM node:20-bookworm-slim AS frontend-builder
 WORKDIR /app/template-mapper-app
 
+# Vite bakes VITE_* env vars into the bundle at build time.
+# Pass them with: docker build --build-arg VITE_SUPABASE_URL=... --build-arg VITE_SUPABASE_ANON_KEY=...
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
+    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+
 COPY template-mapper-app/package.json template-mapper-app/package-lock.json ./
 RUN npm ci
 
@@ -24,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY app.py app_server.py certificate_overlay.py extract_template_coords.py ./
+COPY app.py app_server.py auth.py certificate_overlay.py extract_template_coords.py ./
 COPY fields.json ./
 COPY fields_store ./fields_store
 COPY fonts ./fonts
