@@ -1,6 +1,10 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import JSZip from 'jszip';
+import { useAuth } from './contexts/AuthContext';
+import { apiFetch } from './lib/apiFetch';
+import Auth from './components/Auth';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -80,6 +84,44 @@ function sanitizeHtml(html) {
   });
 
   return template.innerHTML;
+}
+
+/**
+ * Normalize HTML produced by Chrome's contentEditable inside a flex container.
+ * Chrome wraps content in <div> blocks when execCommand (bold/font/etc.) runs
+ * on a flex contentEditable element, turning "Hello World" into
+ * "<div>Hello World</div>". This function unwraps those block elements back to
+ * inline content separated by <br> tags, preserving intentional line breaks
+ * while removing accidental block wrappers.
+ */
+function normalizeEditorHtml(html) {
+  if (!html || !html.includes('<div') && !html.includes('<p')) {
+    return html;
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(html);
+
+  // Unwrap <div> and <p> blocks: move their children before them, then add
+  // a <br> separator, then remove the block element itself.
+  tpl.content.querySelectorAll('div, p').forEach((block) => {
+    const frag = document.createDocumentFragment();
+    while (block.firstChild) {
+      frag.appendChild(block.firstChild);
+    }
+    const br = document.createElement('br');
+    frag.appendChild(br);
+    block.replaceWith(frag);
+  });
+
+  // Trim trailing <br> elements.
+  let last = tpl.content.lastChild;
+  while (last && last.nodeName === 'BR') {
+    const prev = last.previousSibling;
+    last.remove();
+    last = prev;
+  }
+
+  return tpl.innerHTML;
 }
 
 function escapeCssString(value) {
@@ -170,6 +212,9 @@ const QUICK_COLOR_SWATCHES = [
 ];
 
 const MAX_HISTORY_STEPS = 100;
+const PROJECT_HANDLE_DB_NAME = 'template-mapper-project-db';
+const PROJECT_HANDLE_STORE_NAME = 'project-handles';
+const PROJECT_HANDLE_KEY = 'current-project-file';
 
 function cloneHistoryValue(value) {
   return JSON.parse(JSON.stringify(value));
@@ -177,6 +222,98 @@ function cloneHistoryValue(value) {
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function normalizeProjectFilename(rawName) {
+  const value = typeof rawName === 'string' ? rawName.trim() : '';
+  const lowered = value.toLowerCase();
+  const fallback = 'certificate-project';
+  const baseCandidate =
+    !value || lowered === 'undefined' || lowered === 'null' || lowered === 'nan'
+      ? fallback
+      : value.replace(/\.json$/i, '');
+  const sanitized = baseCandidate
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\.+$/g, '')
+    .trim();
+  const base = sanitized || fallback;
+  return `${base}.json`;
+}
+
+function canUseSavePicker() {
+  return (
+    typeof window !== 'undefined' &&
+    window.isSecureContext &&
+    typeof window.showSaveFilePicker === 'function'
+  );
+}
+
+function runIndexedDbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IndexedDB request failed.'));
+  });
+}
+
+function openProjectHandleDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof window === 'undefined' || !window.indexedDB) {
+      resolve(null);
+      return;
+    }
+
+    const request = window.indexedDB.open(PROJECT_HANDLE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PROJECT_HANDLE_STORE_NAME)) {
+        db.createObjectStore(PROJECT_HANDLE_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Failed to open IndexedDB.'));
+  });
+}
+
+async function getStoredProjectFileHandle() {
+  const db = await openProjectHandleDb();
+  if (!db) {
+    return null;
+  }
+  try {
+    const transaction = db.transaction(PROJECT_HANDLE_STORE_NAME, 'readonly');
+    const store = transaction.objectStore(PROJECT_HANDLE_STORE_NAME);
+    return (await runIndexedDbRequest(store.get(PROJECT_HANDLE_KEY))) || null;
+  } finally {
+    db.close();
+  }
+}
+
+async function setStoredProjectFileHandle(handle) {
+  const db = await openProjectHandleDb();
+  if (!db) {
+    return;
+  }
+  try {
+    const transaction = db.transaction(PROJECT_HANDLE_STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(PROJECT_HANDLE_STORE_NAME);
+    await runIndexedDbRequest(store.put(handle, PROJECT_HANDLE_KEY));
+  } finally {
+    db.close();
+  }
+}
+
+async function clearStoredProjectFileHandle() {
+  const db = await openProjectHandleDb();
+  if (!db) {
+    return;
+  }
+  try {
+    const transaction = db.transaction(PROJECT_HANDLE_STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(PROJECT_HANDLE_STORE_NAME);
+    await runIndexedDbRequest(store.delete(PROJECT_HANDLE_KEY));
+  } finally {
+    db.close();
+  }
 }
 
 function clampBox(box, width, height) {
@@ -268,6 +405,33 @@ function getFilenameFromContentDisposition(contentDisposition, fallbackName) {
   }
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function dataUrlToFile(dataUrl, fallbackName = 'template.bin', fallbackMimeType = 'application/octet-stream') {
+  const value = String(dataUrl || '');
+  const match = value.match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
+  if (!match) {
+    throw new Error('Invalid embedded template data.');
+  }
+
+  const mimeType = match[1] || fallbackMimeType;
+  const payload = decodeURIComponent(match[2] || '');
+  const byteString = atob(payload);
+  const bytes = new Uint8Array(byteString.length);
+  for (let index = 0; index < byteString.length; index += 1) {
+    bytes[index] = byteString.charCodeAt(index);
+  }
+
+  return new File([bytes], fallbackName, { type: mimeType });
+}
+
 async function loadTemplate(file, preset) {
   const ext = file.name.split('.').pop()?.toLowerCase();
   if (ext === 'pdf') {
@@ -293,7 +457,7 @@ async function loadTemplate(file, preset) {
     };
   }
 
-  const imageUrl = URL.createObjectURL(file);
+  const imageUrl = await readFileAsDataUrl(file);
   const image = await new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -311,12 +475,74 @@ async function loadTemplate(file, preset) {
   };
 }
 
+// ── Zip name modal ────────────────────────────────────────────────────────────
+function ZipNameModal({ suggestedName, onConfirm, onCancel }) {
+  const [name, setName] = useState(suggestedName ?? 'certificates');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') onConfirm(name);
+    if (e.key === 'Escape') onCancel();
+  };
+
+  return (
+    <div className="zip-modal-backdrop" onClick={onCancel}>
+      <div className="zip-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="zip-modal-header">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+          <span>Download certificates</span>
+        </div>
+        <div className="zip-modal-body">
+          <label className="zip-modal-label">ZIP file name</label>
+          <div className="zip-modal-input-row">
+            <input
+              ref={inputRef}
+              className="zip-modal-input"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="certificates"
+            />
+            <span className="zip-modal-ext">.zip</span>
+          </div>
+          <p className="zip-modal-hint">
+            {typeof window.showSaveFilePicker === 'function'
+              ? 'A save dialog will open so you can choose the location.'
+              : 'The file will be saved to your default downloads folder.'}
+          </p>
+        </div>
+        <div className="zip-modal-footer">
+          <button type="button" className="zip-modal-btn zip-modal-btn--cancel" onClick={onCancel}>Cancel</button>
+          <button type="button" className="zip-modal-btn zip-modal-btn--confirm" onClick={() => onConfirm(name)}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+            </svg>
+            Save ZIP
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const { session, signOut } = useAuth();
   const layerRef = useRef(null);
   const fontPickerRef = useRef(null);
+  const sizePickerRef = useRef(null);
+  const templateInputRef = useRef(null);
   const [theme, setTheme] = useState('dark');
   const [zoom, setZoom] = useState(1);
   const [templateFile, setTemplateFile] = useState(null);
+  const [templateFileDataUrl, setTemplateFileDataUrl] = useState('');
   const [customFonts, setCustomFonts] = useState([]);
   const [csvFile, setCsvFile] = useState(null);
   const [csvHeaders, setCsvHeaders] = useState([]);
@@ -325,7 +551,8 @@ export default function App() {
   const [useCsv, setUseCsv] = useState(false);
   const [fieldsList, setFieldsList] = useState([]);
   const [selectedFieldsName, setSelectedFieldsName] = useState('');
-  const [saveFieldsName, setSaveFieldsName] = useState('fields.json');
+  const [saveFieldsName, setSaveFieldsName] = useState('certificate-project.json');
+  const [projectFileHandle, setProjectFileHandle] = useState(null);
   const [template, setTemplate] = useState(null);
   const [panelState, setPanelState] = useState({
     fieldLayouts: true,
@@ -352,9 +579,20 @@ export default function App() {
   const toolbarInteractionRef = useRef(false);
   const [interaction, setInteraction] = useState(null);
   const [alignmentGuides, setAlignmentGuides] = useState([]);
-  const [status, setStatus] = useState('');
+  const [statusInfo, setStatusInfo] = useState({ text: '', type: 'info' });
+  const setStatus = (msg, type) => {
+    const m = String(msg || '');
+    const resolvedType = type ?? (
+      /fail|error|cannot|invalid|not found|unexpected/i.test(m) ? 'error' :
+      /saved|success|generated|uploaded|imported|loaded|deleted/i.test(m) ? 'success' :
+      /csv mode|upload a csv|turn off use csv|upload.*first|create.*first|select.*first|load.*first/i.test(m) ? 'warning' :
+      'info'
+    );
+    setStatusInfo({ text: m, type: resolvedType });
+  };
   const [previewUrl, setPreviewUrl] = useState(null);
   const [latestDownload, setLatestDownload] = useState(null);
+  const [zipNameModal, setZipNameModal] = useState({ open: false, suggestedName: 'certificates' });
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
   const [fontHoverFamily, setFontHoverFamily] = useState('');
   const [sizePickerOpen, setSizePickerOpen] = useState(false);
@@ -364,15 +602,14 @@ export default function App() {
   const [activeEditorFont, setActiveEditorFont] = useState('');
   const [insertMenuOpen, setInsertMenuOpen] = useState(false);
   const [layoutsMenuOpen, setLayoutsMenuOpen] = useState(false);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState(null);
   const [generateMenuOpen, setGenerateMenuOpen] = useState(false);
-  const [fontMenuOpen, setFontMenuOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const statusTimeoutRef = useRef(null);
   const [generateOptions, setGenerateOptions] = useState({
     row: 0,
     output_mode: 'full_pdf',
-    dx: 0,
-    dy: 0,
-    grid_step: 0,
     page_size: 'letter',
     generate_all: false,
   });
@@ -381,6 +618,67 @@ export default function App() {
   const historyCurrentRef = useRef(null);
   const historySignatureRef = useRef(null);
   const isApplyingHistoryRef = useRef(false);
+  const preDragSnapshotRef = useRef(null);
+  const [leftTab, setLeftTab] = useState('fields');
+
+  useEffect(() => {
+    let cancelled = false;
+    const restoreProjectHandle = async () => {
+      if (!canUseSavePicker()) {
+        return;
+      }
+      try {
+        const storedHandle = await getStoredProjectFileHandle();
+        if (!cancelled && storedHandle) {
+          setProjectFileHandle(storedHandle);
+        }
+      } catch (error) {
+        console.warn('Failed to restore project file handle:', error);
+      }
+    };
+    restoreProjectHandle();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (statusTimeoutRef.current) {
+      clearTimeout(statusTimeoutRef.current);
+      statusTimeoutRef.current = null;
+    }
+
+    if (!statusInfo.text) {
+      return undefined;
+    }
+
+    const isGeneratingMessage = /^generating\.{0,3}$/i.test(statusInfo.text.trim());
+    if (isGenerating && isGeneratingMessage) {
+      return undefined;
+    }
+
+    const timeoutMs =
+      statusInfo.type === 'error' ? 9000 :
+      statusInfo.type === 'warning' ? 7000 :
+      4500;
+
+    statusTimeoutRef.current = setTimeout(() => {
+      setStatusInfo((current) => {
+        if (current.text !== statusInfo.text) {
+          return current;
+        }
+        return { text: '', type: current.type };
+      });
+      statusTimeoutRef.current = null;
+    }, timeoutMs);
+
+    return () => {
+      if (statusTimeoutRef.current) {
+        clearTimeout(statusTimeoutRef.current);
+        statusTimeoutRef.current = null;
+      }
+    };
+  }, [statusInfo, isGenerating]);
 
   const pageSize = useMemo(() => {
     if (preset === 'custom') {
@@ -397,6 +695,8 @@ export default function App() {
 
   const activeField = fields.find((field) => field.id === activeFieldId) ?? null;
   const activeImage = imageItems.find((image) => image.id === activeImageId) ?? null;
+  const isGenerateActionDisabled = !template || fields.length === 0;
+  const generateDisabledTooltip = 'Load a template to generate';
 
   const buildHistorySnapshot = () => ({
     fields: cloneHistoryValue(fields),
@@ -406,9 +706,6 @@ export default function App() {
     fieldMappings: cloneHistoryValue(fieldMappings),
     useCsv,
     generateOptions: cloneHistoryValue(generateOptions),
-    activeFieldId,
-    activeImageId,
-    isEditingText,
   });
 
   const applyHistorySnapshot = (snapshot) => {
@@ -424,9 +721,8 @@ export default function App() {
     setFieldMappings(safeSnapshot.fieldMappings ?? {});
     setUseCsv(Boolean(safeSnapshot.useCsv));
     setGenerateOptions((prev) => ({ ...prev, ...(safeSnapshot.generateOptions ?? {}) }));
-    setActiveFieldId(safeSnapshot.activeFieldId ?? null);
-    setActiveImageId(safeSnapshot.activeImageId ?? null);
-    setIsEditingText(Boolean(safeSnapshot.isEditingText));
+    // Selection state (activeFieldId, activeImageId, isEditingText) is intentionally
+    // NOT restored — undo/redo only affects document content, not UI selection.
 
     setTimeout(() => {
       isApplyingHistoryRef.current = false;
@@ -502,9 +798,8 @@ export default function App() {
     fieldMappings,
     useCsv,
     generateOptions,
-    activeFieldId,
-    activeImageId,
-    isEditingText,
+    // activeFieldId, activeImageId, isEditingText are excluded: selection changes
+    // are not undoable document operations.
   ]);
 
   const availableFontValues = useMemo(
@@ -666,7 +961,7 @@ export default function App() {
 
   const refreshFieldsList = async () => {
     try {
-      const response = await fetch('/api/fields/list');
+      const response = await apiFetch('/api/fields/list');
       if (!response.ok) {
         setStatus('Failed to load fields list.');
         return;
@@ -722,7 +1017,7 @@ export default function App() {
 
   const fetchCustomFonts = async () => {
     try {
-      const response = await fetch('/api/list-custom-fonts');
+      const response = await apiFetch('/api/list-custom-fonts');
       if (!response.ok) {
         console.error('Failed to fetch custom fonts');
         return;
@@ -739,7 +1034,7 @@ export default function App() {
     formData.append('font_file', file);
 
     try {
-      const response = await fetch('/api/upload-font', {
+      const response = await apiFetch('/api/upload-font', {
         method: 'POST',
         body: formData,
       });
@@ -761,12 +1056,8 @@ export default function App() {
   };
 
   const deleteFont = async (filename) => {
-    if (!confirm(`Delete font "${filename}"? This cannot be undone.`)) {
-      return;
-    }
-
     try {
-      const response = await fetch(`/api/delete-font/${encodeURIComponent(filename)}`, {
+      const response = await apiFetch(`/api/delete-font/${encodeURIComponent(filename)}`, {
         method: 'DELETE',
       });
 
@@ -788,29 +1079,22 @@ export default function App() {
 
   useEffect(() => {
     const handleClickOutside = (event) => {
-      const clickedButton = event.target.closest('.menu-button');
-      const clickedDropdown = event.target.closest('.dropdown-menu');
-      const clickedFontPicker = event.target.closest('.font-picker');
-      const clickedSizePicker = event.target.closest('.size-picker');
+      const clickedNavItem = event.target.closest('.nav-menu-item');
+      const clickedGenerateGroup = event.target.closest('.topbar-generate');
+      const clickedSettingsDock = event.target.closest('.settings-dock');
+      const insideFontPicker = fontPickerRef.current && fontPickerRef.current.contains(event.target);
+      const insideSizePicker = sizePickerRef.current && sizePickerRef.current.contains(event.target);
       const clickedColorPicker = event.target.closest('.color-picker');
-      
-      if (insertMenuOpen && !clickedButton?.textContent?.includes('Insert') && !clickedDropdown) {
-        setInsertMenuOpen(false);
-      }
-      if (layoutsMenuOpen && !clickedButton?.textContent?.includes('Layouts') && !clickedDropdown) {
-        setLayoutsMenuOpen(false);
-      }
-      if (generateMenuOpen && !clickedButton?.textContent?.includes('Generate') && !clickedDropdown) {
-        setGenerateMenuOpen(false);
-      }
-      if (fontMenuOpen && !clickedButton?.textContent?.includes('Fonts') && !clickedDropdown) {
-        setFontMenuOpen(false);
-      }
-      if (fontPickerOpen && !clickedFontPicker) {
+
+      if (insertMenuOpen && !clickedNavItem) setInsertMenuOpen(false);
+      if (layoutsMenuOpen && !clickedNavItem) setLayoutsMenuOpen(false);
+      if (generateMenuOpen && !clickedGenerateGroup) setGenerateMenuOpen(false);
+      if (settingsMenuOpen && !clickedSettingsDock) { setSettingsMenuOpen(false); setSettingsTab(null); }
+      if (fontPickerOpen && !insideFontPicker) {
         setFontPickerOpen(false);
         setFontHoverFamily('');
       }
-      if (sizePickerOpen && !clickedSizePicker) {
+      if (sizePickerOpen && !insideSizePicker) {
         setSizePickerOpen(false);
         setSizeHoverValue(null);
       }
@@ -821,7 +1105,7 @@ export default function App() {
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [insertMenuOpen, layoutsMenuOpen, generateMenuOpen, fontMenuOpen, fontPickerOpen, sizePickerOpen, colorPickerOpen]);
+  }, [insertMenuOpen, layoutsMenuOpen, settingsMenuOpen, generateMenuOpen, fontPickerOpen, sizePickerOpen, colorPickerOpen]);
 
   useEffect(() => {
     const classList = document.documentElement.classList;
@@ -842,7 +1126,7 @@ export default function App() {
     };
   }, [template]);
 
-  const buildPayload = () => {
+  const buildPayload = (includeTemplateAsset = true) => {
     if (!template || !scales) {
       return null;
     }
@@ -932,6 +1216,14 @@ export default function App() {
         field_mappings: fieldMappings,
         use_csv: useCsv,
         generate_options: generateOptions,
+        template_asset:
+          includeTemplateAsset && templateFileDataUrl && templateFile
+            ? {
+                file_name: templateFile.name,
+                file_type: templateFile.type || '',
+                data_url: templateFileDataUrl,
+              }
+            : null,
       },
     };
   };
@@ -958,8 +1250,9 @@ export default function App() {
     return payload;
   };
 
-  const payloadToLayout = (payload) => {
-    if (!template || !scales || !payload || !Array.isArray(payload.fields)) {
+  const payloadToLayout = (payload, templateOverride = null) => {
+    const templateForLayout = templateOverride ?? template;
+    if (!templateForLayout || !payload || !Array.isArray(payload.fields)) {
       return {
         fields: [],
         images: [],
@@ -967,25 +1260,30 @@ export default function App() {
       };
     }
 
+    const localScales = {
+      x: templateForLayout.pageWidthPt / templateForLayout.displayWidth,
+      y: templateForLayout.pageHeightPt / templateForLayout.displayHeight,
+    };
+
     const mappedFields = payload.fields.map((field, idx) => {
       const align = field.align ?? 'left';
       const widthPt = Number(field.box_width ?? field.max_width ?? 150);
-      const widthPx = widthPt / scales.x;
+      const widthPx = widthPt / localScales.x;
       const sizePt = Number(field.size ?? payload.default_size ?? 18);
       const estimatedHeightPt = Math.max(
         24,
-        ((sizePt * 1.6) / template.pageHeightPt) * template.displayHeight * scales.y
+        ((sizePt * 1.6) / templateForLayout.pageHeightPt) * templateForLayout.displayHeight * localScales.y
       );
       const heightPt = Number(field.box_height ?? estimatedHeightPt);
-      const heightPx = Math.max(8, heightPt / scales.y);
-      const anchorX = Number(field.x) / scales.x;
+      const heightPx = Math.max(8, heightPt / localScales.y);
+      const anchorX = Number(field.x) / localScales.x;
       const wrapTopPt = Number(field.wrap_start_y);
       const legacyY = Number(field.y);
       const topPt = Number.isFinite(wrapTopPt)
         ? wrapTopPt
         : Number.isFinite(legacyY)
           ? legacyY + sizePt
-          : template.pageHeightPt;
+          : templateForLayout.pageHeightPt;
 
       let leftX = anchorX;
       if (align === 'center') {
@@ -994,7 +1292,7 @@ export default function App() {
         leftX = anchorX - widthPx;
       }
 
-      const y = template.displayHeight - (topPt / scales.y);
+      const y = templateForLayout.displayHeight - (topPt / localScales.y);
 
       // Extract bold/italic from font name
       const fontName = field.font ?? payload.default_font ?? 'Helvetica';
@@ -1023,10 +1321,10 @@ export default function App() {
       } else if (fontName.startsWith('Courier')) {
         baseFont = 'Courier';
       }
-      const resolvedFont = availableFontValues.has(baseFont)
-        ? baseFont
-        : availableFontValues.has(fontName)
-          ? fontName
+      const resolvedFont = availableFontValues.has(fontName)
+        ? fontName
+        : availableFontValues.has(baseFont)
+          ? baseFont
           : 'Helvetica';
 
       return clampBox(
@@ -1048,8 +1346,8 @@ export default function App() {
           bold,
           italic,
         },
-        template.displayWidth,
-        template.displayHeight
+        templateForLayout.displayWidth,
+        templateForLayout.displayHeight
       );
     });
 
@@ -1065,11 +1363,11 @@ export default function App() {
               return null;
             }
 
-            const widthPx = Math.max(8, wPt / scales.x);
-            const heightPx = Math.max(8, hPt / scales.y);
-            const xPx = xPt / scales.x;
+            const widthPx = Math.max(8, wPt / localScales.x);
+            const heightPx = Math.max(8, hPt / localScales.y);
+            const xPx = xPt / localScales.x;
             const topPt = yPt + hPt;
-            const yPx = template.displayHeight - (topPt / scales.y);
+            const yPx = templateForLayout.displayHeight - (topPt / localScales.y);
 
             return clampBox(
               {
@@ -1081,8 +1379,8 @@ export default function App() {
                 h: heightPx,
                 src,
               },
-              template.displayWidth,
-              template.displayHeight
+              templateForLayout.displayWidth,
+              templateForLayout.displayHeight
             );
           })
           .filter(Boolean)
@@ -1163,15 +1461,12 @@ export default function App() {
     }
   };
 
-  const loadFile = async (event) => {
-    const [file] = event.target.files ?? [];
-    if (!file) {
-      return;
-    }
-
+  const loadTemplateFile = async (file) => {
     const loaded = await loadTemplate(file, pageSize);
+    const fileDataUrl = await readFileAsDataUrl(file);
     setTemplate(loaded);
     setTemplateFile(file);
+    setTemplateFileDataUrl(fileDataUrl);
     setFields([]);
     setImageItems([]);
     setActiveFieldId(null);
@@ -1180,12 +1475,25 @@ export default function App() {
     setSampleHtmlValues({});
     setStatus(`Loaded template: ${loaded.name}`);
 
+    // Auto-fit zoom so the template is fully visible in the canvas panel on load
+    requestAnimationFrame(() => {
+      const canvasEl = document.getElementById('canvasArea');
+      if (canvasEl && loaded.displayWidth && loaded.displayHeight) {
+        const availW = canvasEl.clientWidth - 96;   // minus scroll-body padding (40×2) + margin
+        const availH = canvasEl.clientHeight - 96;
+        if (availW > 0 && availH > 0) {
+          const fitZoom = Math.min(availW / loaded.displayWidth, availH / loaded.displayHeight, 1);
+          setZoom(Math.max(0.25, parseFloat(fitZoom.toFixed(2))));
+        }
+      }
+    });
+
     // Extract fonts from PDF template
     if (file.name.toLowerCase().endsWith('.pdf')) {
       try {
         const formData = new FormData();
         formData.append('template', file);
-        const response = await fetch('/api/extract-fonts', {
+        const response = await apiFetch('/api/extract-fonts', {
           method: 'POST',
           body: formData,
         });
@@ -1197,6 +1505,38 @@ export default function App() {
         console.error('Failed to extract fonts:', error);
       }
     }
+  };
+
+  const loadFile = async (event) => {
+    const [file] = event.target.files ?? [];
+    if (!file) {
+      return;
+    }
+    try {
+      await loadTemplateFile(file);
+    } catch (error) {
+      setStatus(`Failed to load template: ${error?.message || error}`);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const restoreTemplateFromLayoutState = async (layoutState) => {
+    const asset = layoutState && typeof layoutState === 'object' ? layoutState.template_asset : null;
+    if (!asset || typeof asset !== 'object' || !asset.data_url) {
+      return null;
+    }
+
+    const restoredFile = dataUrlToFile(
+      asset.data_url,
+      asset.file_name || 'template.bin',
+      asset.file_type || 'application/octet-stream'
+    );
+    const restoredTemplate = await loadTemplate(restoredFile, pageSize);
+    setTemplate(restoredTemplate);
+    setTemplateFile(restoredFile);
+    setTemplateFileDataUrl(asset.data_url);
+    return restoredTemplate;
   };
 
   const getPointFromEvent = (event) => {
@@ -1217,10 +1557,14 @@ export default function App() {
     const textValue = hasDraft
       ? editingDraftRef.current.text ?? ''
       : sampleValues[resolvedName] ?? '';
+    // normalizeEditorHtml strips Chrome-inserted <div> block wrappers that
+    // execCommand (bold/font) produces when run inside a flex contentEditable.
     const htmlValue = sanitizeHtml(
-      hasDraft
-        ? editingDraftRef.current.html ?? plainTextToHtml(textValue)
-        : sampleHtmlValues[resolvedName] ?? plainTextToHtml(textValue)
+      normalizeEditorHtml(
+        hasDraft
+          ? editingDraftRef.current.html ?? plainTextToHtml(textValue)
+          : sampleHtmlValues[resolvedName] ?? plainTextToHtml(textValue)
+      )
     );
 
     setSampleValues((prev) => {
@@ -1303,6 +1647,9 @@ export default function App() {
       return;
     }
     commitActiveEditingDraft();
+    // Capture state before the drag so we can push a single undo entry on drop.
+    preDragSnapshotRef.current = buildHistorySnapshot();
+    isApplyingHistoryRef.current = true;
     if (targetType === 'image') {
       setActiveImageId(targetId);
       setActiveFieldId(null);
@@ -1325,6 +1672,9 @@ export default function App() {
       return;
     }
     commitActiveEditingDraft();
+    // Capture state before the resize so we can push a single undo entry on release.
+    preDragSnapshotRef.current = buildHistorySnapshot();
+    isApplyingHistoryRef.current = true;
     setIsEditingText(false);
     if (targetType === 'image') {
       setActiveImageId(targetId);
@@ -1465,9 +1815,25 @@ export default function App() {
       return false;
     }
 
+    // Normalize Chrome-inserted <div> block wrappers produced by execCommand
+    // on a flex contentEditable (they break layout when rendered outside editing).
+    const normalizedHtml = normalizeEditorHtml(editorEl.innerHTML);
+    if (normalizedHtml !== editorEl.innerHTML) {
+      // Restore selection after patching innerHTML, then re-save it.
+      const sel = window.getSelection();
+      const rangeToRestore = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+      editorEl.innerHTML = normalizedHtml;
+      if (rangeToRestore) {
+        try {
+          const newSel = window.getSelection();
+          if (newSel) { newSel.removeAllRanges(); newSel.addRange(rangeToRestore); }
+        } catch (_) { /* best-effort */ }
+      }
+    }
+
     editingDraftRef.current = {
       name: activeField.name,
-      html: editorEl.innerHTML,
+      html: normalizedHtml,
       text: editorEl.innerText,
     };
     const selectionAfterCommand = window.getSelection();
@@ -1551,6 +1917,12 @@ export default function App() {
       if (hasSelection || hasSavedSelection || !requireSelection) {
         const didApply = applyFormatting(command, value);
         if (didApply) {
+          // When a font is applied inline to selected text, also persist the font
+          // choice on the field itself so the toolbar reflects the change and
+          // subsequent whole-field style updates (bold, size, …) don't revert it.
+          if (command === 'fontName' && fieldPatch?.font) {
+            updateField(activeField.id, { font: fieldPatch.font });
+          }
           return;
         }
       }
@@ -1789,6 +2161,8 @@ export default function App() {
       const dx = point.x - interaction.startX;
       const dy = point.y - interaction.startY;
       if (interaction.mode === 'move') {
+        // Ignore micro-movements so a plain click doesn't accidentally nudge the field
+        if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
         const newX = interaction.initial.x + dx;
         const newY = interaction.initial.y + dy;
 
@@ -1909,6 +2283,21 @@ export default function App() {
 
   const endDraw = () => {
     if (interaction) {
+      // Commit the move/resize as a single undo entry.
+      const preDrag = preDragSnapshotRef.current;
+      if (preDrag) {
+        const postDragSig = JSON.stringify(buildHistorySnapshot());
+        if (JSON.stringify(preDrag) !== postDragSig) {
+          undoStackRef.current.push(preDrag);
+          if (undoStackRef.current.length > MAX_HISTORY_STEPS) undoStackRef.current.shift();
+          redoStackRef.current = [];
+        }
+        preDragSnapshotRef.current = null;
+      }
+      // Resume normal history tracking after React has flushed the final state.
+      setTimeout(() => {
+        isApplyingHistoryRef.current = false;
+      }, 0);
       setInteraction(null);
       setAlignmentGuides([]);
       return;
@@ -2065,7 +2454,7 @@ export default function App() {
   };
 
   const exportJson = () => {
-    const payload = buildPayload();
+    const payload = buildPayload(false);
     if (!payload) {
       return;
     }
@@ -2074,13 +2463,178 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'fields.json';
+    a.download = saveFieldsName?.trim() || 'fields.json';
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const saveToBackend = async () => {
-    const payload = buildPayload();
+  const buildProjectSaveBundle = () => {
+    const payload = buildPayload(true);
+    if (!payload) {
+      setStatus('Load a template and create fields first.');
+      return null;
+    }
+
+    const filename = normalizeProjectFilename(saveFieldsName);
+    return {
+      filename,
+      serialized: JSON.stringify(payload, null, 2),
+    };
+  };
+
+  const downloadProjectFallback = (serialized, filename, statusMessage = 'Saved project file to Downloads (browser fallback).') => {
+    const blob = new Blob([serialized], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatus(statusMessage);
+  };
+
+  const persistProjectFileHandle = async (fileHandle) => {
+    setProjectFileHandle(fileHandle);
+    try {
+      await setStoredProjectFileHandle(fileHandle);
+    } catch (error) {
+      console.warn('Unable to persist project file handle:', error);
+    }
+  };
+
+  const clearPersistedProjectFileHandle = async () => {
+    setProjectFileHandle(null);
+    try {
+      await clearStoredProjectFileHandle();
+    } catch (error) {
+      console.warn('Unable to clear stored project file handle:', error);
+    }
+  };
+
+  const writeProjectToHandle = async (fileHandle, serialized, fallbackFilename) => {
+    try {
+      if (!fileHandle) {
+        setStatus('No project file is selected. Use Save Project As... first.');
+        return false;
+      }
+      const writable = await fileHandle.createWritable();
+      await writable.write(serialized);
+      await writable.close();
+
+       if (typeof fileHandle.getFile === 'function' && serialized.length > 0) {
+        const savedFile = await fileHandle.getFile();
+        if (savedFile && savedFile.size === 0) {
+          setStatus('Project save produced an empty file. A download fallback will be used.');
+          return false;
+        }
+      }
+
+      await persistProjectFileHandle(fileHandle);
+      setStatus(`Saved project to ${fileHandle.name || fallbackFilename}.`);
+      return true;
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        setStatus('Save cancelled.');
+        return false;
+      }
+      if (error?.name === 'NotFoundError') {
+        await clearPersistedProjectFileHandle();
+        setStatus('The previous project file is no longer available. Choose Save Project As... to pick a new location.');
+        return false;
+      }
+      if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+        setStatus('Write access was denied. Try Save Project As... and choose a writable location.');
+        return false;
+      }
+      throw error;
+    }
+  };
+
+  const saveProjectAsToFile = async (bundleOverride = null) => {
+    const isBundleObject =
+      bundleOverride &&
+      typeof bundleOverride === 'object' &&
+      typeof bundleOverride.filename === 'string' &&
+      typeof bundleOverride.serialized === 'string';
+    const bundle = isBundleObject ? bundleOverride : buildProjectSaveBundle();
+    if (!bundle) {
+      return;
+    }
+    const { filename, serialized } = bundle;
+
+    try {
+      if (canUseSavePicker()) {
+        const fileHandle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [
+            {
+              description: 'JSON project file',
+              accept: { 'application/json': ['.json'] },
+            },
+          ],
+        });
+        const didSave = await writeProjectToHandle(fileHandle, serialized, filename);
+        if (!didSave) {
+          downloadProjectFallback(
+            serialized,
+            filename,
+            'Direct file save failed. Downloaded a project file fallback.'
+          );
+          return;
+        }
+        return;
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        setStatus('Save cancelled.');
+        return;
+      }
+      setStatus(`Save picker failed (${error?.message || error}). Downloaded file instead.`);
+    }
+
+    downloadProjectFallback(serialized, filename);
+  };
+
+  const saveProjectToFile = async () => {
+    const bundle = buildProjectSaveBundle();
+    if (!bundle) {
+      return;
+    }
+    const { filename, serialized } = bundle;
+
+    if (!canUseSavePicker()) {
+      downloadProjectFallback(
+        serialized,
+        filename,
+        'Browser does not support direct file save. Downloaded project file instead.'
+      );
+      return;
+    }
+
+    if (!projectFileHandle) {
+      await saveProjectAsToFile(bundle);
+      return;
+    }
+
+    try {
+      const didSave = await writeProjectToHandle(projectFileHandle, serialized, filename);
+      if (!didSave) {
+        downloadProjectFallback(
+          serialized,
+          filename,
+          'Direct save failed. Downloaded a project file fallback. Use Save Project As... to re-link the target file.'
+        );
+        return;
+      }
+    } catch (error) {
+      setStatus(`Failed to save project (${error?.message || error}).`);
+    }
+  };
+
+  const saveToBackend = async (includeTemplateAsset) => {
+    const payload = buildPayload(includeTemplateAsset);
     if (!payload) {
       setStatus('Load a template and create fields first.');
       return;
@@ -2088,7 +2642,7 @@ export default function App() {
 
     const targetName = saveFieldsName?.trim() || 'fields.json';
 
-    const response = await fetch(`/api/fields?name=${encodeURIComponent(targetName)}`, {
+    const response = await apiFetch(`/api/fields?name=${encodeURIComponent(targetName)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -2097,29 +2651,44 @@ export default function App() {
       setStatus(`Failed to save ${targetName} to backend.`);
       return;
     }
-    setStatus(`Saved ${targetName} on backend.`);
+    setStatus(
+      includeTemplateAsset
+        ? `Saved project ${targetName} (template + layout) on backend.`
+        : `Saved layout ${targetName} (without template) on backend.`
+    );
     refreshFieldsList();
   };
 
   const loadFromBackend = async () => {
-    if (!template) {
-      setStatus('Load template first so coordinates can be mapped to canvas.');
-      return;
-    }
-
     const targetName = selectedFieldsName?.trim() || 'fields.json';
     if (!selectedFieldsName?.trim()) {
       setStatus('Select a backend fields file first.');
       return;
     }
 
-    const response = await fetch(`/api/fields?name=${encodeURIComponent(targetName)}`);
+    const response = await apiFetch(`/api/fields?name=${encodeURIComponent(targetName)}`);
     if (!response.ok) {
       setStatus(`Failed to load backend ${targetName}.`);
       return;
     }
     const payload = await response.json();
-    const next = payloadToLayout(payload);
+    let templateForLayout = template;
+    try {
+      const restoredTemplate = await restoreTemplateFromLayoutState(payload.layout_state);
+      if (restoredTemplate) {
+        templateForLayout = restoredTemplate;
+      }
+    } catch (error) {
+      setStatus(`Failed to restore template from ${targetName}: ${error?.message || error}`);
+      return;
+    }
+
+    if (!templateForLayout) {
+      setStatus(`No template is currently loaded and ${targetName} does not include an embedded template.`);
+      return;
+    }
+
+    const next = payloadToLayout(payload, templateForLayout);
     setFields(next.fields);
     setImageItems(next.images);
     setActiveFieldId(next.fields[0]?.id ?? null);
@@ -2146,19 +2715,46 @@ export default function App() {
     }
   };
 
-  const loadFromFile = async (event) => {
-    if (!template) {
-      setStatus('Load template first so coordinates can be mapped to canvas.');
-      return;
-    }
-    const [file] = event.target.files ?? [];
-    if (!file) {
-      return;
-    }
+  const loadProjectFile = async (file) => {
     try {
       const text = await file.text();
-      const payload = JSON.parse(text);
-      const next = payloadToLayout(payload);
+      const raw = String(text ?? '');
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        setStatus(`Failed to load ${file.name}: file is empty. Save the project again, then re-import.`);
+        return;
+      }
+      if (trimmed === 'undefined') {
+        setStatus(
+          `Failed to load ${file.name}: file contains "undefined" (invalid JSON). Save again using Project -> Save Project As..., then import that file.`
+        );
+        return;
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(trimmed);
+      } catch (parseError) {
+        setStatus(`Failed to load ${file.name}: invalid JSON (${parseError?.message || parseError}).`);
+        return;
+      }
+      let templateForLayout = template;
+      try {
+        const restoredTemplate = await restoreTemplateFromLayoutState(payload.layout_state);
+        if (restoredTemplate) {
+          templateForLayout = restoredTemplate;
+        }
+      } catch (error) {
+        setStatus(`Failed to restore template from ${file.name}: ${error?.message || error}`);
+        return;
+      }
+
+      if (!templateForLayout) {
+        setStatus(`No template is currently loaded and ${file.name} does not include an embedded template.`);
+        return;
+      }
+
+      const next = payloadToLayout(payload, templateForLayout);
       setFields(next.fields);
       setImageItems(next.images);
       setActiveFieldId(next.fields[0]?.id ?? null);
@@ -2184,7 +2780,39 @@ export default function App() {
         setStatus(`Loaded ${file.name} from disk.`);
       }
     } catch (error) {
-      setStatus(`Failed to load fields file: ${error}`);
+      setStatus(`Failed to load file: ${error}`);
+    }
+  };
+
+  const loadFromFile = async (event) => {
+    const [file] = event.target.files ?? [];
+    if (!file) {
+      return;
+    }
+    try {
+      await loadProjectFile(file);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const handleWorkspaceBrowseFile = async (event) => {
+    const [file] = event.target.files ?? [];
+    if (!file) {
+      return;
+    }
+    const extension = file.name.split('.').pop()?.toLowerCase() || '';
+    const isProjectFile = extension === 'json' || extension === 'certproj';
+    try {
+      if (isProjectFile) {
+        await loadProjectFile(file);
+      } else {
+        await loadTemplateFile(file);
+      }
+    } catch (error) {
+      setStatus(`Failed to load ${file.name}: ${error?.message || error}`);
+    } finally {
+      event.target.value = '';
     }
   };
 
@@ -2234,7 +2862,7 @@ export default function App() {
         setStatus('Upload a template first.');
         return;
       }
-      const fieldsPayload = buildPayload();
+      const fieldsPayload = buildPayload(false);
       if (!fieldsPayload) {
         setStatus('Create fields before generating a PDF.');
         return;
@@ -2248,9 +2876,9 @@ export default function App() {
       const payload = {
         ...generateOptions,
         row: Number(generateOptions.row) || 0,
-        dx: Number(generateOptions.dx) || 0,
-        dy: Number(generateOptions.dy) || 0,
-        grid_step: Number(generateOptions.grid_step) || 0,
+        dx: 0,
+        dy: 0,
+        grid_step: 0,
         placeholder_mode: false,
         overlay_only: generateOptions.output_mode === 'overlay_only',
       };
@@ -2293,7 +2921,7 @@ export default function App() {
 
       let response;
       try {
-        response = await fetch('/api/generate-file-upload', {
+        response = await apiFetch('/api/generate-file-upload', {
           method: 'POST',
           body: formData,
         });
@@ -2343,20 +2971,35 @@ export default function App() {
         /\.zip/i.test(contentDisposition);
 
       if (useCsv && generateOptions.generate_all && isZipResponse) {
-        const blob = new Blob([buffer], { type: 'application/zip' });
-        const url = URL.createObjectURL(blob);
+        const zipBlob = new Blob([buffer], { type: 'application/zip' });
+        const zipUrl = URL.createObjectURL(zipBlob);
         const filename = getFilenameFromContentDisposition(contentDisposition, 'certificates.zip');
         if (latestDownload?.url) {
           URL.revokeObjectURL(latestDownload.url);
         }
-        setLatestDownload({ url, filename, kind: 'zip' });
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setStatus('Downloaded ZIP file containing all certificates.');
+        setLatestDownload({ url: zipUrl, filename, kind: 'zip' });
+
+        // Extract the first PDF from the ZIP and render it as preview
+        let certCount = 0;
+        try {
+          const zip = await JSZip.loadAsync(buffer);
+          const pdfFiles = Object.values(zip.files).filter(
+            (f) => !f.dir && f.name.toLowerCase().endsWith('.pdf')
+          );
+          certCount = pdfFiles.length;
+          if (pdfFiles.length > 0) {
+            const firstPdfBuffer = await pdfFiles[0].async('arraybuffer');
+            const firstBlob = new Blob([firstPdfBuffer], { type: 'application/pdf' });
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
+            setPreviewUrl(URL.createObjectURL(firstBlob));
+            setPanelState((prev) => ({ ...prev, preview: true }));
+          }
+        } catch (zipErr) {
+          console.warn('Could not extract preview from ZIP:', zipErr);
+        }
+
+        const countLabel = certCount > 0 ? `${certCount} certificates` : 'certificates';
+        setStatus(`Generated ${countLabel}. Click Download to save the ZIP.`);
         return;
       }
 
@@ -2398,1417 +3041,1217 @@ export default function App() {
       setStatus('Generate a file first, then download.');
       return;
     }
+    if (latestDownload.kind === 'zip') {
+      // Prompt user for the ZIP folder name before downloading
+      const suggested = (latestDownload.filename || 'certificates.zip').replace(/\.zip$/i, '');
+      setZipNameModal({ open: true, suggestedName: suggested });
+      return;
+    }
     const a = document.createElement('a');
     a.href = latestDownload.url;
     a.download = latestDownload.filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setStatus(
-      latestDownload.kind === 'zip'
-        ? 'Downloaded ZIP file containing all certificates.'
-        : 'Downloaded the latest generated certificate.'
-    );
+    setStatus('Downloaded the latest generated certificate.');
   };
+
+  const confirmZipDownload = async (chosenName) => {
+    setZipNameModal({ open: false, suggestedName: chosenName });
+    if (!latestDownload?.url) return;
+
+    const finalName = `${chosenName.trim() || 'certificates'}.zip`;
+
+    // Prefer the File System Access API so the user can pick a folder/location
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        const fileHandle = await window.showSaveFilePicker({
+          suggestedName: finalName,
+          types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }],
+        });
+        const response = await fetch(latestDownload.url);
+        const blob = await response.blob();
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        setStatus(`ZIP saved as "${fileHandle.name}".`);
+        return;
+      } catch (err) {
+        if (err?.name === 'AbortError') return; // user cancelled picker
+        console.warn('showSaveFilePicker failed, falling back to anchor download:', err);
+      }
+    }
+
+    // Fallback: standard anchor download with the custom filename
+    const a = document.createElement('a');
+    a.href = latestDownload.url;
+    a.download = finalName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setStatus(`Downloaded ZIP as "${finalName}".`);
+  };
+
+  // ── Auth gate ────────────────────────────────────────────────────────────
+  if (session === undefined) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#0f0e0d', color: 'rgba(255,255,255,0.4)', fontFamily: "'DM Sans', sans-serif", fontSize: '14px' }}>
+        Loading…
+      </div>
+    );
+  }
+  if (!session) return <Auth />;
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div className="topbar-main">
-          <div className="brand">
-            <span className="brand-mark">CS</span>
-            <div className="brand-text">
-              <h1>CertStudio</h1>
-            </div>
-            <span className="brand-divider"></span>
+      {/* ── TOP BAR ── */}
+      <div className="topbar">
+        <div className="logo">
+          <div className="logo-mark">CS</div>
+          <div className="logo-name">Cert<span>Studio</span></div>
+        </div>
+        <div className="topbar-divider" />
+
+        <div className="topbar-menu">
+          {/* FILE menu */}
+          <div className="nav-menu-item">
             <button
               type="button"
-              className="menu-button"
-              onClick={() => {
-                setInsertMenuOpen(!insertMenuOpen);
-                setLayoutsMenuOpen(false);
-                setGenerateMenuOpen(false);
-                setFontMenuOpen(false);
-              }}
+              className={`menu-btn ${insertMenuOpen ? 'open' : ''}`}
+              onClick={() => { setInsertMenuOpen(!insertMenuOpen); setLayoutsMenuOpen(false); setSettingsMenuOpen(false); setGenerateMenuOpen(false); }}
             >
-              Insert
-            </button>
-            <button
-              type="button"
-              className="menu-button"
-              onClick={() => {
-                setInsertMenuOpen(false);
-                setLayoutsMenuOpen(!layoutsMenuOpen);
-                setGenerateMenuOpen(false);
-                setFontMenuOpen(false);
-              }}
-            >
-              Layouts
-            </button>
-            <button
-              type="button"
-              className="menu-button"
-              onClick={() => {
-                setInsertMenuOpen(false);
-                setGenerateMenuOpen(!generateMenuOpen);
-                setLayoutsMenuOpen(false);
-                setFontMenuOpen(false);
-              }}
-            >
-              Generate
-            </button>
-            <button
-              type="button"
-              className="menu-button"
-              onClick={() => {
-                setInsertMenuOpen(false);
-                setFontMenuOpen(!fontMenuOpen);
-                setLayoutsMenuOpen(false);
-                setGenerateMenuOpen(false);
-              }}
-            >
-              Fonts
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/></svg>
+              File
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             {insertMenuOpen && (
-              <div className="dropdown-menu">
-                <div className="dropdown-content">
-                  <label>
-                    <span className="label-title">Template file</span>
-                    <span className="label-hint">PDF, JPG, or PNG</span>
-                    <input
-                      type="file"
-                      accept=".pdf,.png,.jpg,.jpeg"
-                      onChange={(event) => {
-                        loadFile(event);
-                        setInsertMenuOpen(false);
-                      }}
-                    />
+              <div className="nav-dropdown nav-dropdown--wide">
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Open</div>
+                  <label className="nav-dropdown-item nav-dropdown-item--file">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><rect x="1" y="3" width="14" height="11" rx="1.5"/><path d="M1 6h14M5 1l-2 2M11 1l2 2"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Open template…</span>
+                      <span className="nav-item-hint">PDF, JPG, or PNG — resets canvas</span>
+                    </span>
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(event) => { if (fields.length > 0 || imageItems.length > 0) { if (!window.confirm('Opening a new template will clear all current fields and images. Continue?')) { event.target.value = ''; return; } } loadFile(event); setInsertMenuOpen(false); }} />
                   </label>
-                  <label>
-                    <span className="label-title">Signature or image</span>
-                    <span className="label-hint">Add signature/logo as draggable element</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(event) => {
-                        importImageElement(event);
-                        setInsertMenuOpen(false);
-                      }}
-                    />
+                  <label className="nav-dropdown-item nav-dropdown-item--file">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M8 1v9M4 6l4 4 4-4"/><path d="M1 12v2a1 1 0 001 1h12a1 1 0 001-1v-2"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Open project…</span>
+                      <span className="nav-item-hint">Load saved .json or .certproj work</span>
+                    </span>
+                    <input type="file" accept=".json,.certproj" onChange={(event) => { loadFromFile(event); setInsertMenuOpen(false); }} />
+                  </label>
+                </div>
+                <div className="nav-dropdown-divider" />
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Save</div>
+                  <button type="button" className="nav-dropdown-item" onClick={() => { saveProjectToFile(); setInsertMenuOpen(false); }} disabled={!template || (fields.length === 0 && imageItems.length === 0)}>
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M13 14H3a1 1 0 01-1-1V3a1 1 0 011-1h7.5L14 5.5V13a1 1 0 01-1 1z"/><rect x="5" y="9" width="6" height="5"/><rect x="4" y="1" width="6" height="4"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Save project</span>
+                      <span className="nav-item-hint">{projectFileHandle?.name ? `Overwrite ${projectFileHandle.name}` : 'Save template + layout'}</span>
+                    </span>
+                    <span className="nav-item-shortcut">Ctrl+S</span>
+                  </button>
+                  <button type="button" className="nav-dropdown-item" onClick={() => { saveProjectAsToFile(); setInsertMenuOpen(false); }} disabled={!template || (fields.length === 0 && imageItems.length === 0)}>
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M13 14H3a1 1 0 01-1-1V3a1 1 0 011-1h7.5L14 5.5V13a1 1 0 01-1 1z"/><path d="M9 1v4M11 3H7"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Save project as…</span>
+                      <span className="nav-item-hint">Choose another file location</span>
+                    </span>
+                    <span className="nav-item-shortcut">Ctrl+Shift+S</span>
+                  </button>
+                </div>
+                <div className="nav-dropdown-divider" />
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Insert</div>
+                  <label className="nav-dropdown-item nav-dropdown-item--file">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><rect x="2" y="2" width="12" height="12" rx="1.5"/><circle cx="5.5" cy="5.5" r="1.5"/><path d="M2 10.5l3.5-3.5 3 3 2-2 3.5 3.5"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Place image / signature…</span>
+                      <span className="nav-item-hint">Draggable image overlay</span>
+                    </span>
+                    <input type="file" accept="image/*" onChange={(event) => { importImageElement(event); setInsertMenuOpen(false); }} />
                   </label>
                 </div>
               </div>
             )}
-            {generateMenuOpen && (
-              <div className="dropdown-menu">
-                <div className="dropdown-content">
-                  <label>
-                    <span className="label-title">Output mode</span>
-                    <select
-                      value={generateOptions.output_mode}
-                      onChange={(event) =>
-                        setGenerateOptions((prev) => ({ ...prev, output_mode: event.target.value }))
-                      }
-                    >
-                      <option value="full_pdf">Full PDF (with template)</option>
-                      <option value="overlay_only">Overlay only (for pre-printed sheets)</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span className="label-title">Page size</span>
-                    <select
-                      value={generateOptions.page_size}
-                      onChange={(event) =>
-                        setGenerateOptions((prev) => ({ ...prev, page_size: event.target.value }))
-                      }
-                    >
-                      <option value="letter">letter</option>
-                      <option value="a4">a4</option>
-                      <option value="legal">legal</option>
-                    </select>
-                  </label>
-                  <div className="grid-two">
-                    <label>
-                      <span className="label-title">Global X offset (pt)</span>
-                      <input
-                        type="number"
-                        value={generateOptions.dx}
-                        onChange={(event) =>
-                          setGenerateOptions((prev) => ({ ...prev, dx: Number(event.target.value) }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      <span className="label-title">Global Y offset (pt)</span>
-                      <input
-                        type="number"
-                        value={generateOptions.dy}
-                        onChange={(event) =>
-                          setGenerateOptions((prev) => ({ ...prev, dy: Number(event.target.value) }))
-                        }
-                      />
-                    </label>
-                  </div>
-                  <label>
-                    <span className="label-title">Grid step (pt, 0 to hide)</span>
-                    <input
-                      type="number"
-                      value={generateOptions.grid_step}
-                      onChange={(event) =>
-                        setGenerateOptions((prev) => ({ ...prev, grid_step: Number(event.target.value) }))
-                      }
-                    />
-                  </label>
-                  {useCsv && csvFile && (
-                    <label className="check-row">
-                      <input
-                        type="checkbox"
-                        checked={generateOptions.generate_all}
-                        onChange={(event) =>
-                          setGenerateOptions((prev) => ({ ...prev, generate_all: event.target.checked }))
-                        }
-                      />
-                      <span>Generate for all candidates in CSV</span>
-                    </label>
-                  )}
-                  <div className="button-row">
-                    <button type="button" onClick={generatePdf} className="primary-button" disabled={isGenerating}>
-                      {isGenerating ? 'Generating…' : 'Generate PDF'}
-                    </button>
-                    <button type="button" onClick={downloadLatestFile} disabled={!latestDownload?.url}>
-                      {latestDownload?.kind === 'zip' ? 'Download ZIP' : 'Download PDF'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+          </div>
+
+          {/* LAYOUTS menu */}
+          <div className="nav-menu-item">
+            <button
+              type="button"
+              className={`menu-btn ${layoutsMenuOpen ? 'open' : ''}`}
+              onClick={() => { setLayoutsMenuOpen(!layoutsMenuOpen); setInsertMenuOpen(false); setSettingsMenuOpen(false); setGenerateMenuOpen(false); }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+              Layouts
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
             {layoutsMenuOpen && (
-              <div className="dropdown-menu">
-                <div className="dropdown-content">
-                  <label>
-                    <span className="label-title">Saved layouts</span>
-                    <select
-                      value={selectedFieldsName}
-                      onChange={(event) => setSelectedFieldsName(event.target.value)}
-                    >
-                      <option value="">Select layout...</option>
-                      {fieldsList.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
+              <div className="nav-dropdown nav-dropdown--wide">
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Layout library (server)</div>
+                  <div className="nav-dropdown-inline-row">
+                    <select value={selectedFieldsName} onChange={(event) => setSelectedFieldsName(event.target.value)} className="nav-dropdown-select">
+                      <option value="">Select saved layout…</option>
+                      {fieldsList.map((name) => (<option key={name} value={name}>{name}</option>))}
                     </select>
-                  </label>
-                  <div className="button-row">
-                    <button type="button" onClick={loadFromBackend} disabled={!selectedFieldsName} className="secondary-button">
-                      Load
-                    </button>
-                    <button
-                      type="button"
-                      onClick={saveToBackend}
-                      disabled={!template || (fields.length === 0 && imageItems.length === 0)}
-                      className="secondary-button"
-                    >
-                      Save
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => refreshFieldsList()}
-                    >
-                      Refresh
+                    <button type="button" className="nav-inline-btn" onClick={loadFromBackend} disabled={!selectedFieldsName}>Load</button>
+                    <button type="button" className="nav-inline-btn" onClick={() => saveToBackend(false)} disabled={!template || (fields.length === 0 && imageItems.length === 0)}>Save</button>
+                    <button type="button" className="nav-inline-btn nav-inline-btn--icon" onClick={refreshFieldsList} data-tip="Refresh">
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M13.7 8A5.7 5.7 0 112.3 5.3"/><path d="M2 2v3.3h3.3"/></svg>
                     </button>
                   </div>
-                  <div className="section-divider"></div>
-                  <label>
-                    <span className="label-title">Import from file</span>
-                    <input type="file" accept=".json" onChange={loadFromFile} />
-                  </label>
-                  <label>
-                    <span className="label-title">Export name</span>
-                    <input
-                      value={saveFieldsName}
-                      onChange={(event) => setSaveFieldsName(event.target.value)}
-                      placeholder="fields.json"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    onClick={exportJson}
-                    disabled={!template || (fields.length === 0 && imageItems.length === 0)}
-                    className="secondary-button"
-                  >
-                    Export to file
-                  </button>
                 </div>
-              </div>
-            )}
-            {fontMenuOpen && (
-              <div className="dropdown-menu">
-                <div className="dropdown-content">
-                  <label>
-                    <span className="label-title">Upload font file (.ttf or .otf)</span>
-                    <input
-                      type="file"
-                      accept=".ttf,.otf"
-                      onChange={async (event) => {
-                        const file = event.target.files?.[0];
-                        if (file) {
-                          await uploadFont(file);
-                          event.target.value = '';
-                        }
-                      }}
-                    />
+                <div className="nav-dropdown-divider" />
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Local files</div>
+                  <label className="nav-dropdown-item nav-dropdown-item--file">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M8 1v9M4 6l4 4 4-4"/><path d="M1 12v2a1 1 0 001 1h12a1 1 0 001-1v-2"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Import layout / project…</span>
+                      <span className="nav-item-hint">Load a local .json or .certproj file</span>
+                    </span>
+                    <input type="file" accept=".json,.certproj" onChange={(event) => { loadFromFile(event); setLayoutsMenuOpen(false); }} />
                   </label>
-
-                  {customFonts.length > 0 ? (
-                    <div>
-                      <div className="label-title" style={{ marginTop: '12px', marginBottom: '8px' }}>
-                        Installed fonts ({customFonts.length})
-                      </div>
-                      <div style={{ display: 'grid', gap: '6px', maxHeight: '300px', overflowY: 'auto' }}>
-                        {customFonts.map((font) => (
-                          <div
-                            key={font.file}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              padding: '6px 8px',
-                              background: 'var(--panel-soft)',
-                              border: '1px solid var(--line)',
-                              borderRadius: 'var(--radius)',
-                              fontSize: '0.75rem',
-                            }}
-                          >
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {font.name}
-                              </div>
-                              <div style={{ fontSize: '0.688rem', color: 'var(--ink-muted)', marginTop: '2px' }}>
-                                {font.file} • {font.size_kb} KB
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => deleteFont(font.file)}
-                              style={{
-                                marginLeft: '8px',
-                                padding: '4px 8px',
-                                fontSize: '0.688rem',
-                                background: 'var(--danger)',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: 'var(--radius)',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="hint" style={{ marginTop: '12px' }}>
-                      No custom fonts uploaded yet. Upload .ttf or .otf files to use them in your certificates.
-                    </p>
-                  )}
-
-                  <div style={{ marginTop: '12px', padding: '8px', background: 'var(--panel-soft)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', fontSize: '0.688rem', color: 'var(--ink-soft)' }}>
-                    <strong>Tip:</strong> Download free fonts from{' '}
-                    <a href="https://fonts.google.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>
-                      Google Fonts
-                    </a>
+                  <div className="nav-dropdown-inline-row">
+                    <input className="nav-dropdown-input" value={saveFieldsName} onChange={(event) => setSaveFieldsName(event.target.value)} placeholder="certificate-project.json" />
+                    <button type="button" className="nav-inline-btn" onClick={() => { exportJson(); setLayoutsMenuOpen(false); }} disabled={!template || (fields.length === 0 && imageItems.length === 0)}>Export JSON</button>
                   </div>
                 </div>
               </div>
             )}
-          </div>
-          <div className="topbar-right">
-            <div className="theme-toggle" aria-label="Theme">
-              <button
-                type="button"
-                className={`theme-pill ${theme === 'light' ? 'active' : ''}`}
-                onClick={() => setTheme('light')}
-              >
-                Light
-              </button>
-              <button
-                type="button"
-                className={`theme-pill ${theme === 'dark' ? 'active' : ''}`}
-                onClick={() => setTheme('dark')}
-              >
-                Dark
-              </button>
-            </div>
-          <div className="topbar-meta">
-            <span className="meta-label">Template</span>
-            <span className="meta-value">
-              {template?.name ?? 'No file loaded'}
-            </span>
-            </div>
           </div>
         </div>
-        <div className="topbar-secondary">
-          {/* Left side: canvas controls (compact) */}
-          <div className="topbar-left-controls">
-            <div className="topbar-group compact">
-              <label>
-                <span className="label-title">Page size for images</span>
-                <select value={preset} onChange={(event) => setPreset(event.target.value)}>
-                  {Object.entries(PAGE_PRESETS).map(([value, item]) => (
-                    <option key={value} value={value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {preset === 'custom' && (
-                <div className="custom-size">
-                  <label>
-                    Width (pt)
-                    <input
-                      type="number"
-                      value={customSize.width}
-                      onChange={(event) => setCustomSize((prev) => ({ ...prev, width: Number(event.target.value) }))}
-                    />
-                  </label>
-                  <label>
-                    Height (pt)
-                    <input
-                      type="number"
-                      value={customSize.height}
-                      onChange={(event) => setCustomSize((prev) => ({ ...prev, height: Number(event.target.value) }))}
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
-            <div className="topbar-group compact">
-              <label className="slider-label">
-                <span className="label-title">Zoom</span>
-                <div className="slider-row">
-                  <input
-                    type="range"
-                    min="0.25"
-                    max="2"
-                    step="0.05"
-                    value={zoom}
-                    onChange={(event) => setZoom(Number(event.target.value))}
-                  />
-                  <span className="slider-value">{Math.round(zoom * 100)}%</span>
-                </div>
-              </label>
-            </div>
-          </div>
 
-          {/* Right side: Editing controls (greyed out when no field is selected) - Photoshop style */}
-          <div
-            className={`topbar-editing-controls ${!activeField ? 'disabled' : ''}`}
-            onMouseDownCapture={() => {
-              cacheSelectionRangeFromEditor();
-              toolbarInteractionRef.current = true;
-              window.setTimeout(() => {
-                toolbarInteractionRef.current = false;
-              }, 0);
-            }}
+        <div className="topbar-spacer" />
+
+        <div className="template-status">
+          <div className="template-dot" />
+          {template?.name ?? 'No template loaded'}
+        </div>
+
+        <div className="topbar-actions">
+          <button type="button" className="btn-icon" data-tip="Undo (Ctrl+Z)" onClick={performUndo}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 7v6h6M3.51 15A9 9 0 1019.5 6.5L13 13"/></svg>
+          </button>
+          <button type="button" className="btn-icon" data-tip="Redo (Ctrl+Y)" onClick={performRedo}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 7v6h-6M20.49 15A9 9 0 114.5 6.5L11 13"/></svg>
+          </button>
+          {previewUrl && (
+            <button type="button" className="btn-icon" data-tip="Open preview" onClick={() => window.open(previewUrl, '_blank', 'noopener,noreferrer')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          )}
+          <div style={{ width: 8 }} />
+          <div className="topbar-generate" title={isGenerateActionDisabled ? generateDisabledTooltip : ''}>
+            <div className="generate-btn-group">
+              <button type="button" className="btn-generate" disabled={isGenerateActionDisabled || isGenerating} onClick={generatePdf}>
+                {isGenerating ? (<><span className="generate-spinner" />Generating…</>) : (<><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>Generate PDF</>)}
+              </button>
+              <button type="button" className="btn-generate-arrow" disabled={isGenerateActionDisabled} onClick={() => { setGenerateMenuOpen(!generateMenuOpen); setInsertMenuOpen(false); setLayoutsMenuOpen(false); setSettingsMenuOpen(false); }}>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+            </div>
+            {generateMenuOpen && (
+              <div className="nav-dropdown nav-dropdown--right nav-dropdown--wide">
+                <div className="nav-dropdown-section">
+                  <div className="nav-dropdown-section-title">Output settings</div>
+                  <div className="nav-form-row">
+                    <label className="nav-form-label">Output mode</label>
+                    <select className="nav-dropdown-select" value={generateOptions.output_mode} onChange={(event) => setGenerateOptions((prev) => ({ ...prev, output_mode: event.target.value }))}>
+                      <option value="full_pdf">Full PDF — includes background</option>
+                      <option value="overlay_only">Overlay only — no background</option>
+                    </select>
+                  </div>
+                  <div className="nav-form-row">
+                    <label className="nav-form-label">Page size</label>
+                    <select className="nav-dropdown-select" value={generateOptions.page_size} onChange={(event) => setGenerateOptions((prev) => ({ ...prev, page_size: event.target.value }))}>
+                      <option value="letter">Letter (8.5 × 11 in)</option>
+                      <option value="a4">A4 (210 × 297 mm)</option>
+                      <option value="legal">Legal (8.5 × 14 in)</option>
+                    </select>
+                  </div>
+                </div>
+                {useCsv && csvFile && (
+                  <>
+                    <div className="nav-dropdown-divider" />
+                    <div className="nav-dropdown-section">
+                      <div className="nav-dropdown-section-title">CSV batch</div>
+                      <label className="nav-dropdown-item nav-dropdown-item--check">
+                        <input type="checkbox" checked={generateOptions.generate_all} onChange={(event) => setGenerateOptions((prev) => ({ ...prev, generate_all: event.target.checked }))} />
+                        <span className="nav-item-text">
+                          <span className="nav-item-label">Generate all rows</span>
+                          <span className="nav-item-hint">Creates one certificate per CSV row, downloads as ZIP</span>
+                        </span>
+                      </label>
+                    </div>
+                  </>
+                )}
+                {latestDownload?.url && (
+                  <>
+                    <div className="nav-dropdown-divider" />
+                    <div className="nav-dropdown-section">
+                      <button type="button" className="nav-dropdown-item nav-dropdown-item--download" onClick={() => { downloadLatestFile(); setGenerateMenuOpen(false); }}>
+                        <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M8 2v9M4 8l4 4 4-4"/><path d="M2 14h12"/></svg></span>
+                        <span className="nav-item-text">
+                          <span className="nav-item-label">{latestDownload.kind === 'zip' ? 'Download certificates ZIP' : 'Download certificate PDF'}</span>
+                          <span className="nav-item-hint">Last generated output</span>
+                        </span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        {/* ── SIGN OUT ── */}
+        <div style={{ marginLeft: '8px' }}>
+          <button
+            type="button"
+            className="btn-icon"
+            data-tip={`Sign out (${session?.user?.email ?? ''})`}
+            onClick={signOut}
           >
-            <div className="editing-row editing-row-primary">
-              <div className="text-control-item medium">
-                <span className="label-title">Field</span>
-                <input
-                  value={activeField?.name || ''}
-                  onChange={(event) => activeField && updateField(activeField.id, { name: event.target.value })}
-                  placeholder="Select field"
-                />
-              </div>
-
-              <div className="text-control-item wide font-picker" ref={fontPickerRef}>
-                <span className="label-title">Font</span>
-                <button
-                  type="button"
-                  className="font-picker-trigger"
-                  onMouseDown={(event) => {
-                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                    if (editorEl) {
-                      event.preventDefault();
-                    }
-                  }}
-                  onClick={() => {
-                    setFontPickerOpen((prev) => !prev);
-                    setFontHoverFamily('');
-                  }}
-                  style={{ fontFamily: resolveFontTokenToCss(displayedFontValue).family || displayedFontValue }}
-                  title={displayedFontValue}
-                >
-                  {displayedFontValue}
-                </button>
-                {fontPickerOpen && (
-                  <div
-                    className="font-picker-menu"
-                    onMouseLeave={() => setFontHoverFamily('')}
-                  >
-                    <div className="font-picker-group-title">ReportLab Built-in Fonts</div>
-                    {fontPickerGroups.builtIn.map((family) => {
-                      const cssFont = resolveFontTokenToCss(family.value);
-                      return (
-                      <button
-                        key={family.value}
-                        type="button"
-                        className={`font-picker-option ${displayedFontValue === family.value ? 'active' : ''}`}
-                        onMouseDown={(event) => {
-                          const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                          if (editorEl) {
-                            event.preventDefault();
-                          }
-                        }}
-                        onMouseEnter={() => setFontHoverFamily(family.value)}
-                        onFocus={() => setFontHoverFamily(family.value)}
-                        onClick={() => {
-                          setFontHoverFamily('');
-                          setFontPickerOpen(false);
-                          applyInlineCommandOrFieldUpdate({
-                            command: 'fontName',
-                            value: family.value,
-                            fieldPatch: { font: family.value },
-                            requireSelection: false,
-                          });
-                          setActiveEditorFont(family.value);
-                        }}
-                        title={family.label}
-                        style={{
-                          fontFamily: cssFont.family || family.value,
-                          fontWeight: cssFont.weight || 'normal',
-                          fontStyle: cssFont.style || 'normal',
-                        }}
-                      >
-                        {family.label}
-                      </button>
-                      );
-                    })}
-                    {fontPickerGroups.custom.length > 0 && (
-                      <>
-                        <div className="font-picker-group-title">Uploaded Custom Fonts</div>
-                        {fontPickerGroups.custom.map((font) => (
-                          <button
-                            key={font.name}
-                            type="button"
-                            className={`font-picker-option ${displayedFontValue === font.name ? 'active' : ''}`}
-                            onMouseDown={(event) => {
-                              const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                              if (editorEl) {
-                                event.preventDefault();
-                              }
-                            }}
-                            onMouseEnter={() => setFontHoverFamily(font.name)}
-                            onFocus={() => setFontHoverFamily(font.name)}
-                            onClick={() => {
-                              setFontHoverFamily('');
-                              setFontPickerOpen(false);
-                              applyInlineCommandOrFieldUpdate({
-                                command: 'fontName',
-                                value: font.name,
-                                fieldPatch: { font: font.name },
-                                requireSelection: false,
-                              });
-                              setActiveEditorFont(font.name);
-                            }}
-                            title={font.name}
-                            style={{ fontFamily: resolveFontTokenToCss(font.name).family || font.name }}
-                          >
-                            {font.name}
-                          </button>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-control-item small size-picker">
-                <span className="label-title">Size</span>
-                <div className="compact-inline">
-                  <input
-                    type="number"
-                    value={displayedSizeValue}
-                    onChange={(event) => activeField && updateField(activeField.id, { size: Number(event.target.value) })}
-                    placeholder="12"
-                  />
-                  <button
-                    type="button"
-                    className="font-picker-trigger size-trigger"
-                    onMouseDown={(event) => {
-                      const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                      if (editorEl) {
-                        event.preventDefault();
-                      }
-                    }}
-                    onClick={() => {
-                      setSizePickerOpen((prev) => !prev);
-                      setSizeHoverValue(null);
-                    }}
-                  >
-                    ▾
-                  </button>
-                </div>
-                {sizePickerOpen && (
-                  <div
-                    className="font-picker-menu size-picker-menu"
-                    onMouseLeave={() => setSizeHoverValue(null)}
-                  >
-                    <div className="font-picker-group-title">Quick Sizes</div>
-                    {COMMON_FONT_SIZES.map((size) => (
-                      <button
-                        key={size}
-                        type="button"
-                        className={`font-picker-option ${Number(activeField?.size) === size ? 'active' : ''}`}
-                        onMouseDown={(event) => {
-                          const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                          if (editorEl) {
-                            event.preventDefault();
-                          }
-                        }}
-                        onMouseEnter={() => setSizeHoverValue(size)}
-                        onFocus={() => setSizeHoverValue(size)}
-                        onClick={() => {
-                          setSizeHoverValue(null);
-                          setSizePickerOpen(false);
-                          if (activeField) {
-                            updateField(activeField.id, { size });
-                          }
-                        }}
-                      >
-                        {size} pt
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-control-item mini color-picker">
-                <span className="label-title">Color</span>
-                <div className="compact-inline">
-                  <input
-                    type="color"
-                    value={displayedColorValue}
-                    onChange={(event) =>
-                      applyInlineCommandOrFieldUpdate({
-                        command: 'foreColor',
-                        value: event.target.value,
-                        fieldPatch: {
-                          color: hexToColorArray(event.target.value),
-                        },
-                        requireSelection: true,
-                        selectionMessage: 'Select text in the field to apply color.',
-                      })
-                    }
-                    style={{ width: '100%', padding: '2px' }}
-                  />
-                  <button
-                    type="button"
-                    className="font-picker-trigger size-trigger"
-                    onMouseDown={(event) => {
-                      const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                      if (editorEl) {
-                        event.preventDefault();
-                      }
-                    }}
-                    onClick={() => {
-                      setColorPickerOpen((prev) => !prev);
-                      setColorHoverValue('');
-                    }}
-                    style={{
-                      background: displayedColorValue,
-                      color: displayedColorValue.toLowerCase() === '#ffffff' ? '#111111' : '#ffffff',
-                    }}
-                    title={displayedColorValue}
-                  >
-                    ▾
-                  </button>
-                </div>
-                {colorPickerOpen && (
-                  <div
-                    className="font-picker-menu color-picker-menu"
-                    onMouseLeave={() => setColorHoverValue('')}
-                  >
-                    <div className="font-picker-group-title">Quick Colors</div>
-                    <div className="color-swatch-grid">
-                      {QUICK_COLOR_SWATCHES.map((hex) => (
-                        <button
-                          key={hex}
-                          type="button"
-                          className={`color-swatch ${displayedColorValue.toLowerCase() === hex.toLowerCase() ? 'active' : ''}`}
-                          style={{ background: hex }}
-                          onMouseDown={(event) => {
-                            const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                            if (editorEl) {
-                              event.preventDefault();
-                            }
-                          }}
-                          onMouseEnter={() => setColorHoverValue(hex)}
-                          onFocus={() => setColorHoverValue(hex)}
-                          onClick={() => {
-                            setColorHoverValue('');
-                            setColorPickerOpen(false);
-                            applyInlineCommandOrFieldUpdate({
-                              command: 'foreColor',
-                              value: hex,
-                              fieldPatch: {
-                                color: hexToColorArray(hex),
-                              },
-                              requireSelection: true,
-                              selectionMessage: 'Select text in the field to apply color.',
-                            });
-                          }}
-                          title={hex}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="editing-row editing-row-secondary">
-              <div className="icon-buttons-group">
-                <button
-                  type="button"
-                  className={`icon-button ${activeField?.bold ? 'active' : ''}`}
-                  onMouseDown={(event) => {
-                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                    if (editorEl) {
-                      event.preventDefault();
-                    }
-                  }}
-                  onClick={() => handleInlineStyleClick('bold', 'bold')}
-                  title={isEditingText ? 'Bold (select text first)' : 'Bold'}
-                >
-                  B
-                </button>
-                <button
-                  type="button"
-                  className={`icon-button ${activeField?.italic ? 'active' : ''}`}
-                  onMouseDown={(event) => {
-                    const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]');
-                    if (editorEl) {
-                      event.preventDefault();
-                    }
-                  }}
-                  onClick={() => handleInlineStyleClick('italic', 'italic')}
-                  title={isEditingText ? 'Italic (select text first)' : 'Italic'}
-                  style={{ fontStyle: 'italic' }}
-                >
-                  I
-                </button>
-              </div>
-
-              <div className="text-control-item small compact-select">
-                <span className="label-title">Align</span>
-                <select
-                  value={activeField?.align || 'left'}
-                  onChange={(event) => activeField && updateField(activeField.id, { align: event.target.value })}
-                >
-                  <option value="left">Left</option>
-                  <option value="center">Center</option>
-                  <option value="right">Right</option>
-                </select>
-              </div>
-
-              <label className="compact-toggle">
-                <input
-                  type="checkbox"
-                  checked={activeField?.maxWidth || false}
-                  onChange={(event) => activeField && updateField(activeField.id, { maxWidth: event.target.checked })}
-                />
-                <span>Fit</span>
-              </label>
-
-              <label className="compact-toggle">
-                <input
-                  type="checkbox"
-                  checked={activeField?.wrapText || false}
-                  onChange={(event) => activeField && updateField(activeField.id, { wrapText: event.target.checked })}
-                />
-                <span>Wrap</span>
-              </label>
-            </div>
-          </div>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
+            </svg>
+          </button>
         </div>
-      </header>
+      </div>
 
-      {status && <div className="status-bar">{status}</div>}
+      {/* ── TOOLBAR ── */}
+      <div className="toolbar">
+        {/* Field name */}
+        <div className="tool-group">
+          <input
+            className="font-picker-trigger"
+            style={{ minWidth: 120 }}
+            value={activeField?.name || ''}
+            onChange={(event) => activeField && updateField(activeField.id, { name: event.target.value })}
+            placeholder="— field name —"
+            disabled={!activeField}
+          />
+        </div>
 
-      <main className="workspace">
-        <section className="sidebar sidebar-left">
-          {/* FIELDS LIST */}
-          <div className={`panel ${panelState.fields ? '' : 'collapsed'}`}>
-            <div className="panel-header" onClick={() => togglePanel('fields')}>
-              <h2>Fields</h2>
-              <div className="panel-actions">
-                <button
-                  type="button"
-                  className="panel-toggle"
-                  data-state={panelState.fields ? 'open' : 'closed'}
-                  aria-label="Toggle fields list"
-                  onClick={(event) => {
-                    stopPanelToggle(event);
-                    togglePanel('fields');
-                  }}
-                />
-              </div>
-            </div>
-            <div className="panel-body">
-              <div className="field-list">
-                {fields.map((field) => (
+        <div className="tool-sep" />
+
+        {/* Font picker */}
+        <div className="tool-group" ref={fontPickerRef}>
+          <button
+            type="button"
+            className="font-picker-trigger"
+            onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+            onClick={() => { setFontPickerOpen((prev) => !prev); setFontHoverFamily(''); }}
+            style={{ fontFamily: resolveFontTokenToCss(displayedFontValue).family || displayedFontValue }}
+            title={displayedFontValue}
+            disabled={!activeField}
+          >
+            {displayedFontValue || 'Font'}
+          </button>
+          {fontPickerOpen && (
+            <div className="font-picker-menu" onMouseLeave={() => setFontHoverFamily('')}>
+              <div className="font-picker-group-title">ReportLab Built-in Fonts</div>
+              {fontPickerGroups.builtIn.map((family) => {
+                const cssFont = resolveFontTokenToCss(family.value);
+                return (
                   <button
+                    key={family.value}
                     type="button"
-                    key={field.id}
-                    className={`field-row ${activeFieldId === field.id ? 'selected' : ''}`}
-                    onClick={() => {
-                      commitActiveEditingDraft();
-                      setIsEditingText(false);
-                      setActiveImageId(null);
-                      setActiveFieldId(field.id);
-                    }}
+                    className={`font-picker-option ${displayedFontValue === family.value ? 'active' : ''}`}
+                    onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+                    onMouseEnter={() => setFontHoverFamily(family.value)}
+                    onClick={() => { setFontHoverFamily(''); setFontPickerOpen(false); applyInlineCommandOrFieldUpdate({ command: 'fontName', value: family.value, fieldPatch: { font: family.value }, requireSelection: false }); setActiveEditorFont(family.value); }}
+                    title={family.label}
+                    style={{ fontFamily: cssFont.family || family.value, fontWeight: cssFont.weight || 'normal', fontStyle: cssFont.style || 'normal' }}
                   >
-                    <span className="field-row-name">{field.name}</span>
-                    <span className="field-row-meta">{field.align}</span>
+                    {family.label}
                   </button>
-                ))}
-                {fields.length === 0 && (
-                  <p className="hint">Drag on the template to create your first field.</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="canvas-panel">
-          {!template && (
-            <div className="empty-state">
-              <h2>Start by loading a template</h2>
-              <p>Pick a certificate PDF or image above, then drag boxes on this canvas to define each field.</p>
+                );
+              })}
+              {fontPickerGroups.custom.length > 0 && (
+                <>
+                  <div className="font-picker-group-title">Custom Fonts</div>
+                  {fontPickerGroups.custom.map((font) => (
+                    <button
+                      key={font.name}
+                      type="button"
+                      className={`font-picker-option ${displayedFontValue === font.name ? 'active' : ''}`}
+                      onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+                      onMouseEnter={() => setFontHoverFamily(font.name)}
+                      onClick={() => { setFontHoverFamily(''); setFontPickerOpen(false); applyInlineCommandOrFieldUpdate({ command: 'fontName', value: font.name, fieldPatch: { font: font.name }, requireSelection: false }); setActiveEditorFont(font.name); }}
+                      title={font.name}
+                      style={{ fontFamily: resolveFontTokenToCss(font.name).family || font.name }}
+                    >
+                      {font.name}
+                    </button>
+                  ))}
+                </>
+              )}
             </div>
           )}
-          {template && (
-            <div
-              className="template-layer"
-              ref={layerRef}
-              style={{
-                width: template.displayWidth,
-                height: template.displayHeight,
-                transform: `scale(${zoom})`,
-                transformOrigin: 'top left',
-              }}
-              onMouseDown={beginDraw}
-              onMouseMove={moveDraw}
-              onMouseUp={endDraw}
-            >
-              <img src={template.src} alt="Template" draggable={false} className="template-image" />
+        </div>
 
-              {fields.map((field) => {
-                const sampleText = sampleValues[field.name] ?? `{${field.name}}`;
-                const committedHtml = sampleHtmlValues[field.name];
-                const fallbackHtml = plainTextToHtml(sampleText);
-                const displayHtml = committedHtml ?? fallbackHtml;
-                const isCsvMappedField = useCsv && Boolean(fieldMappings[field.name]);
-                const hoveredColorArray = colorHoverValue ? hexToColorArray(colorHoverValue) : field.color;
-                const previewSizePt = activeFieldId === field.id && sizeHoverValue ? Number(sizeHoverValue) : Number(field.size);
-                const previewFontPx = (previewSizePt / template.pageHeightPt) * template.displayHeight;
-                const fittedPx = field.maxWidth ? fitSizeForPreview(sampleText, field.w, previewFontPx) : previewFontPx;
-                const isActive = activeFieldId === field.id;
-                const isInlineEditing = isActive && isEditingText && !isCsvMappedField;
-                const previewFontToken = isActive && fontHoverFamily ? fontHoverFamily : field.font;
-                const previewFontCss = resolveFontTokenToCss(previewFontToken);
-                const previewColor = isActive ? hoveredColorArray : field.color;
-
-                return (
-                  <div
-                    key={field.id}
-                    className={`field-box ${isActive ? 'active' : ''}`}
-                    style={{ left: field.x, top: field.y, width: field.w, height: field.h }}
-                    onMouseDown={(event) => {
-                      const target = event.target;
-                      if (!(target instanceof HTMLElement)) {
-                        return;
-                      }
-                      const isResizeHandle = !!target.closest('.resize-handle');
-                      if (isResizeHandle) {
-                        return;
-                      }
-
-                      const previewEl = target.closest('.field-preview');
-                      if (previewEl) {
-                        event.stopPropagation();
-                        if (isEditingText && activeFieldId && activeFieldId !== field.id) {
-                          commitActiveEditingDraft();
-                        }
-                        setActiveFieldId(field.id);
-                        setActiveImageId(null);
-
-                        if (isCsvMappedField) {
-                          setIsEditingText(false);
-                          setStatus(`"${field.name}" is mapped to CSV column "${fieldMappings[field.name]}" and is read-only.`);
-                          return;
-                        }
-
-                        const isSameEditingField =
-                          isEditingText && editingDraftRef.current.name === field.name;
-                        if (!isSameEditingField) {
-                          // Seed editing draft immediately so rich formatting is preserved.
-                          editingDraftRef.current = {
-                            name: field.name,
-                            html: displayHtml,
-                            text: sampleText,
-                          };
-                          lastSelectionRangeRef.current = null;
-                        }
-
-                        setIsEditingText(true);
-                        setTimeout(() => {
-                          if (previewEl instanceof HTMLElement) {
-                            previewEl.focus();
-                          }
-                        }, 0);
-                        return;
-                      }
-                      
-                      // Otherwise, we're clicking on the edge/border - start moving
-                      beginMove(event, field.id);
-                    }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      const target = event.target;
-                      if (!(target instanceof HTMLElement)) {
-                        return;
-                      }
-                      if (!target.closest('.field-preview') && !target.closest('.resize-handle')) {
-                        commitActiveEditingDraft();
-                        setActiveFieldId(field.id);
-                        setActiveImageId(null);
-                        setIsEditingText(false);
-                      }
-                    }}
-                    onDoubleClick={(event) => {
-                      const target = event.target;
-                      if (!(target instanceof HTMLElement)) {
-                        return;
-                      }
-                      if (!target.closest('.field-preview') && !target.closest('.resize-handle')) {
-                        handleFieldDoubleClick(field);
-                      }
-                    }}
-                  >
-                    <div
-                      className={`field-preview align-${field.align}`}
-                      contentEditable={isInlineEditing}
-                      suppressContentEditableWarning={true}
-                      spellCheck={false}
-                      ref={(node) => {
-                        if (!node || !isInlineEditing) {
-                          return;
-                        }
-                        const expectedName = editingDraftRef.current.name === field.name
-                          ? editingDraftRef.current.name
-                          : null;
-                        if (!expectedName) {
-                          return;
-                        }
-                        const shouldSeed =
-                          node.dataset.editingField !== expectedName ||
-                          !node.innerHTML ||
-                          node.innerHTML === '<br>';
-                        if (shouldSeed) {
-                          node.innerHTML = editingDraftRef.current.html ?? displayHtml;
-                          node.dataset.editingField = expectedName;
-                        }
-                      }}
-                      style={{
-                        fontSize: fittedPx,
-                        fontFamily: previewFontCss.family || previewFontToken,
-                        color: colorArrayToCss(previewColor),
-                        fontWeight: field.bold ? 'bold' : (previewFontCss.weight || 'normal'),
-                        fontStyle: field.italic ? 'italic' : (previewFontCss.style || 'normal'),
-                        whiteSpace: field.wrapText ? 'pre-wrap' : 'pre',
-                        overflowWrap: field.wrapText ? 'break-word' : 'normal',
-                        wordWrap: field.wrapText ? 'break-word' : 'normal',
-                        cursor: isCsvMappedField ? 'default' : 'text',
-                      }}
-                      onInput={(event) => {
-                        if (isInlineEditing) {
-                          const nextText = event.currentTarget.innerText;
-                          const nextHtml = sanitizeHtml(event.currentTarget.innerHTML);
-                          editingDraftRef.current = {
-                            name: field.name,
-                            html: nextHtml,
-                            text: nextText,
-                          };
-                          setSampleValues((prev) => ({
-                            ...prev,
-                            [field.name]: nextText,
-                          }));
-                          setSampleHtmlValues((prev) => ({
-                            ...prev,
-                            [field.name]: nextHtml,
-                          }));
-                        }
-                      }}
-                      onMouseDown={(event) => {
-                        // When in edit mode, stop propagation to allow text selection
-                        if (isActive && isEditingText) {
-                          event.stopPropagation();
-                        }
-                      }}
-                      onMouseUp={(event) => {
-                        if (!(isActive && isEditingText)) {
-                          return;
-                        }
-                        const selection = window.getSelection();
-                        if (
-                          selection &&
-                          !selection.isCollapsed &&
-                          selection.rangeCount > 0 &&
-                          selectionInsideEditor(event.currentTarget, selection)
-                        ) {
-                          lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
-                        }
-                      }}
-                      onKeyUp={(event) => {
-                        if (!(isActive && isEditingText)) {
-                          return;
-                        }
-                        const selection = window.getSelection();
-                        if (
-                          selection &&
-                          !selection.isCollapsed &&
-                          selection.rangeCount > 0 &&
-                          selectionInsideEditor(event.currentTarget, selection)
-                        ) {
-                          lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
-                        }
-                      }}
-                      onBlur={(event) => {
-                        const nextTarget = event.relatedTarget;
-                        const activeElement = document.activeElement;
-                        const keepEditingByToolbarFocus =
-                          nextTarget instanceof HTMLElement &&
-                          !!nextTarget.closest('.topbar-editing-controls');
-                        const keepEditingByActiveElement =
-                          activeElement instanceof HTMLElement &&
-                          !!activeElement.closest('.topbar-editing-controls');
-                        const keepEditing =
-                          toolbarInteractionRef.current ||
-                          keepEditingByToolbarFocus ||
-                          keepEditingByActiveElement;
-                        if (keepEditing) {
-                          return;
-                        }
-                        commitFieldDraft(field.name);
-                        lastSelectionRangeRef.current = null;
-                        setIsEditingText(false);
-                      }}
-                      dangerouslySetInnerHTML={isInlineEditing ? undefined : { __html: displayHtml }}
-                    >
-                      {null}
-                    </div>
-                    {/* 8 resize handles: 4 corners + 4 edges */}
-                    <span className="resize-handle resize-handle-nw" onMouseDown={(event) => beginResize(event, field.id, 'nw')} />
-                    <span className="resize-handle resize-handle-n" onMouseDown={(event) => beginResize(event, field.id, 'n')} />
-                    <span className="resize-handle resize-handle-ne" onMouseDown={(event) => beginResize(event, field.id, 'ne')} />
-                    <span className="resize-handle resize-handle-e" onMouseDown={(event) => beginResize(event, field.id, 'e')} />
-                    <span className="resize-handle resize-handle-se" onMouseDown={(event) => beginResize(event, field.id, 'se')} />
-                    <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, field.id, 's')} />
-                    <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, field.id, 'sw')} />
-                    <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, field.id, 'w')} />
-                  </div>
-                );
-              })}
-
-              {imageItems.map((image) => {
-                const isActiveImage = activeImageId === image.id;
-                return (
-                  <div
-                    key={image.id}
-                    className={`field-box image-box ${isActiveImage ? 'active' : ''}`}
-                    style={{ left: image.x, top: image.y, width: image.w, height: image.h }}
-                    onMouseDown={(event) => {
-                      const target = event.target;
-                      if (!(target instanceof HTMLElement)) {
-                        return;
-                      }
-                      if (target.closest('.resize-handle')) {
-                        return;
-                      }
-                      beginMove(event, image.id, 'image');
-                    }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      commitActiveEditingDraft();
-                      setActiveImageId(image.id);
-                      setActiveFieldId(null);
-                      setIsEditingText(false);
-                    }}
-                  >
-                    <img src={image.src} alt={image.name || 'Layout image'} className="image-preview" draggable={false} />
-                    <span className="resize-handle resize-handle-nw" onMouseDown={(event) => beginResize(event, image.id, 'nw', 'image')} />
-                    <span className="resize-handle resize-handle-n" onMouseDown={(event) => beginResize(event, image.id, 'n', 'image')} />
-                    <span className="resize-handle resize-handle-ne" onMouseDown={(event) => beginResize(event, image.id, 'ne', 'image')} />
-                    <span className="resize-handle resize-handle-e" onMouseDown={(event) => beginResize(event, image.id, 'e', 'image')} />
-                    <span className="resize-handle resize-handle-se" onMouseDown={(event) => beginResize(event, image.id, 'se', 'image')} />
-                    <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, image.id, 's', 'image')} />
-                    <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, image.id, 'sw', 'image')} />
-                    <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, image.id, 'w', 'image')} />
-                  </div>
-                );
-              })}
-
-              {draftBox && (
-                <div
-                  className="draft-box"
-                  style={{ left: draftBox.x, top: draftBox.y, width: draftBox.w, height: draftBox.h }}
-                />
-              )}
-              
-              {/* Alignment guides */}
-              {alignmentGuides.map((guide, idx) => (
-                guide.type === 'vertical' ? (
-                  <div
-                    key={`guide-v-${idx}`}
-                    className="alignment-guide-vertical"
-                    style={{
-                      position: 'absolute',
-                      left: guide.x,
-                      top: 0,
-                      width: 1,
-                      height: '100%',
-                      backgroundColor: '#00ff00',
-                      pointerEvents: 'none',
-                      zIndex: 1000,
-                    }}
-                  />
-                ) : (
-                  <div
-                    key={`guide-h-${idx}`}
-                    className="alignment-guide-horizontal"
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: guide.y,
-                      width: '100%',
-                      height: 1,
-                      backgroundColor: '#00ff00',
-                      pointerEvents: 'none',
-                      zIndex: 1000,
-                    }}
-                  />
-                )
+        {/* Size */}
+        <div className="tool-group" ref={sizePickerRef}>
+          <input
+            className="size-input"
+            type="number"
+            value={displayedSizeValue}
+            onChange={(event) => activeField && updateField(activeField.id, { size: Number(event.target.value) })}
+            disabled={!activeField}
+          />
+          <button
+            type="button"
+            className="font-picker-trigger size-trigger"
+            onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+            onClick={() => { setSizePickerOpen((prev) => !prev); setSizeHoverValue(null); }}
+            disabled={!activeField}
+          >▾</button>
+          {sizePickerOpen && (
+            <div className="font-picker-menu size-picker-menu" onMouseLeave={() => setSizeHoverValue(null)}>
+              <div className="font-picker-group-title">Quick Sizes</div>
+              {COMMON_FONT_SIZES.map((size) => (
+                <button
+                  key={size}
+                  type="button"
+                  className={`font-picker-option ${Number(activeField?.size) === size ? 'active' : ''}`}
+                  onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+                  onMouseEnter={() => setSizeHoverValue(size)}
+                  onClick={() => { setSizeHoverValue(null); setSizePickerOpen(false); if (activeField) updateField(activeField.id, { size }); }}
+                >
+                  {size} pt
+                </button>
               ))}
             </div>
           )}
-        </section>
+        </div>
 
-        <aside className="sidebar sidebar-right">
-          {/* DATA SOURCE */}
-          <div className={`panel ${panelState.dataSource ? '' : 'collapsed'}`}>
-            <div className="panel-header" onClick={() => togglePanel('dataSource')}>
-              <h2>Data source</h2>
-              <div className="panel-actions">
-                <button
-                  type="button"
-                  className="panel-toggle"
-                  data-state={panelState.dataSource ? 'open' : 'closed'}
-                  aria-label="Toggle data source"
-                  onClick={(event) => {
-                    stopPanelToggle(event);
-                    togglePanel('dataSource');
-                  }}
+        <div className="tool-sep" />
+
+        {/* Bold / Italic */}
+        <div className="tool-group"
+          onMouseDownCapture={() => { cacheSelectionRangeFromEditor(); toolbarInteractionRef.current = true; window.setTimeout(() => { toolbarInteractionRef.current = false; }, 0); }}
+        >
+          <button data-tip="Bold" type="button" className={`tool-btn ${activeField?.bold ? 'active' : ''}`} onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }} onClick={() => handleInlineStyleClick('bold', 'bold')} style={{ fontWeight: 700 }}>B</button>
+          <button data-tip="Italic" type="button" className={`tool-btn ${activeField?.italic ? 'active' : ''}`} onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }} onClick={() => handleInlineStyleClick('italic', 'italic')} style={{ fontStyle: 'italic' }}>I</button>
+        </div>
+
+        <div className="tool-sep" />
+
+        {/* Alignment */}
+        <div className="tool-group">
+          <button type="button" data-tip="Align left" className={`tool-btn ${activeField?.align === 'left' || !activeField?.align ? 'active' : ''}`} onClick={() => activeField && updateField(activeField.id, { align: 'left' })}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
+          </button>
+          <button type="button" data-tip="Center" className={`tool-btn ${activeField?.align === 'center' ? 'active' : ''}`} onClick={() => activeField && updateField(activeField.id, { align: 'center' })}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="10" x2="6" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="18" y1="18" x2="6" y2="18"/></svg>
+          </button>
+          <button type="button" data-tip="Align right" className={`tool-btn ${activeField?.align === 'right' ? 'active' : ''}`} onClick={() => activeField && updateField(activeField.id, { align: 'right' })}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="21" y1="10" x2="7" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="7" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div className="tool-sep" />
+
+        {/* Color */}
+        <div className="tool-group" style={{ position: 'relative' }}>
+          <div
+            className="toolbar-color-swatch"
+            style={{ background: displayedColorValue }}
+            data-tip="Text color"
+            onClick={() => { setColorPickerOpen((prev) => !prev); setColorHoverValue(''); }}
+          />
+          {colorPickerOpen && (
+            <div className="font-picker-menu color-picker-menu" onMouseLeave={() => setColorHoverValue('')}>
+              <div className="font-picker-group-title">Quick Colors</div>
+              <div className="color-swatch-grid">
+                {QUICK_COLOR_SWATCHES.map((hex) => (
+                  <button
+                    key={hex}
+                    type="button"
+                    className={`color-swatch ${displayedColorValue.toLowerCase() === hex.toLowerCase() ? 'active' : ''}`}
+                    style={{ background: hex }}
+                    onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }}
+                    onMouseEnter={() => setColorHoverValue(hex)}
+                    onClick={() => { setColorHoverValue(''); setColorPickerOpen(false); applyInlineCommandOrFieldUpdate({ command: 'foreColor', value: hex, fieldPatch: { color: hexToColorArray(hex) }, requireSelection: true, selectionMessage: 'Select text to apply color.' }); }}
+                    title={hex}
+                  />
+                ))}
+              </div>
+              <div style={{ padding: '4px 6px 8px' }}>
+                <input
+                  type="color"
+                  value={displayedColorValue}
+                  style={{ width: '100%', height: 28, borderRadius: 6, border: 'none', cursor: 'pointer', background: 'none' }}
+                  onChange={(event) => applyInlineCommandOrFieldUpdate({ command: 'foreColor', value: event.target.value, fieldPatch: { color: hexToColorArray(event.target.value) }, requireSelection: true, selectionMessage: 'Select text to apply color.' })}
                 />
               </div>
             </div>
-            <div className="panel-body">
-              <label className="check-row">
-                <input
-                  type="checkbox"
-                  checked={useCsv}
-                  onChange={(event) => setUseCsv(event.target.checked)}
-                />
-                <span>Use CSV data</span>
+          )}
+        </div>
+
+        <div className="tool-sep" />
+
+        {/* Fit / Wrap */}
+        <div className="tool-group">
+          <button data-tip="Fit to width" type="button" className={`tool-btn ${activeField?.maxWidth ? 'active' : ''}`} onClick={() => activeField && updateField(activeField.id, { maxWidth: !activeField.maxWidth })}>Fit</button>
+          <button data-tip="Wrap text" type="button" className={`tool-btn ${activeField?.wrapText ? 'active' : ''}`} onClick={() => activeField && updateField(activeField.id, { wrapText: !activeField.wrapText })}>Wrap</button>
+        </div>
+
+        <div className="tool-sep" />
+
+        {/* Page size */}
+        <select className="page-select" value={preset} onChange={(event) => setPreset(event.target.value)}>
+          {Object.entries(PAGE_PRESETS).map(([value, item]) => (
+            <option key={value} value={value}>{item.label}</option>
+          ))}
+        </select>
+
+        <div className="toolbar-spacer" />
+
+        {/* Zoom */}
+        <div className="zoom-group">
+          <button data-tip="Zoom out" type="button" className="tool-btn" onClick={() => setZoom((z) => Math.max(0.25, parseFloat((z - 0.1).toFixed(2))))}>−</button>
+          <input type="range" min="0.25" max="2" step="0.05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} />
+          <button data-tip="Zoom in" type="button" className="tool-btn" onClick={() => setZoom((z) => Math.min(2, parseFloat((z + 0.1).toFixed(2))))}>+</button>
+          <span className="zoom-label">{Math.round(zoom * 100)}%</span>
+        </div>
+      </div>
+
+      {/* ── STATUS NOTIFICATION ── */}
+      {statusInfo.text && (
+        <div className={`status-notification status-notification--${statusInfo.type}`}>
+          {statusInfo.type === 'success' && '✓ '}
+          {statusInfo.type === 'error' && '✕ '}
+          {statusInfo.type === 'warning' && '⚠ '}
+          {statusInfo.text}
+        </div>
+      )}
+
+      {/* ── APP BODY ── */}
+      <div className="app-body">
+
+        {/* LEFT SIDEBAR */}
+        <div className="sidebar-left">
+          <div className="sidebar-tabs">
+            <button className={`stab ${leftTab === 'fields' ? 'active' : ''}`} onClick={() => setLeftTab('fields')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+              Fields
+            </button>
+            <button className={`stab ${leftTab === 'images' ? 'active' : ''}`} onClick={() => setLeftTab('images')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+              Images
+            </button>
+            <button className={`stab ${leftTab === 'layers' ? 'active' : ''}`} onClick={() => setLeftTab('layers')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+              Layers
+            </button>
+          </div>
+
+          {leftTab === 'fields' && (
+            <div className="sidebar-content">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <span className="tab-count">{fields.length} field{fields.length !== 1 ? 's' : ''}</span>
+              </div>
+              {fields.map((field) => (
+                <div
+                  key={field.id}
+                  className={`field-item ${activeFieldId === field.id ? 'selected' : ''}`}
+                  onClick={() => { commitActiveEditingDraft(); setIsEditingText(false); setActiveImageId(null); setActiveFieldId(field.id); }}
+                >
+                  <div className="field-icon text-icon">T</div>
+                  <div className="field-info">
+                    <div className="field-name">{field.name}</div>
+                    <div className="field-meta">{field.font} · {field.size}pt · {field.align || 'left'}</div>
+                  </div>
+                </div>
+              ))}
+              {fields.length === 0 && (
+                <div className="fields-empty">
+                  <p>Drag on the canvas to create your first text field.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {leftTab === 'images' && (
+            <div className="sidebar-content">
+              {imageItems.map((image) => (
+                <div
+                  key={image.id}
+                  className={`field-item ${activeImageId === image.id ? 'selected' : ''}`}
+                  onClick={() => { commitActiveEditingDraft(); setIsEditingText(false); setActiveFieldId(null); setActiveImageId(image.id); }}
+                >
+                  <div className="field-icon img-icon">IMG</div>
+                  <div className="field-info">
+                    <div className="field-name">{image.name || 'Image'}</div>
+                    <div className="field-meta">{Math.round(image.w)} × {Math.round(image.h)} px</div>
+                  </div>
+                </div>
+              ))}
+              {imageItems.length === 0 && (
+                <div className="fields-empty">
+                  <p>No image overlays yet.<br/>Add signatures, logos, or seals.</p>
+                  <p className="hint">Use File → Insert to place an image</p>
+                </div>
+              )}
+              <label className="add-image-btn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                Place image…
+                <input type="file" accept="image/*" onChange={(event) => { importImageElement(event); }} />
               </label>
-              {useCsv && (
-                <>
-                  <label>
-                    <span className="label-title">Upload CSV file</span>
-                    <input
-                      type="file"
-                      accept=".csv"
-                      onChange={handleCsvFileChange}
-                    />
-                  </label>
-                  {csvFile && csvHeaders.length > 0 && (
-                    <div className="csv-headers-section">
-                      <span className="label-title">CSV Headers Found:</span>
-                      <div className="csv-headers-list">
-                        {csvHeaders.map((header, idx) => (
-                          <span key={idx} className="csv-header-chip">{header}</span>
-                        ))}
+            </div>
+          )}
+
+          {leftTab === 'layers' && (
+            <div className="sidebar-content">
+              {[...fields].reverse().map((field) => (
+                <div
+                  key={field.id}
+                  className={`field-item ${activeFieldId === field.id ? 'selected' : ''}`}
+                  onClick={() => { commitActiveEditingDraft(); setIsEditingText(false); setActiveImageId(null); setActiveFieldId(field.id); }}
+                >
+                  <div className="field-icon text-icon">T</div>
+                  <div className="field-info">
+                    <div className="field-name">{field.name}</div>
+                    <div className="field-meta">text · layer</div>
+                  </div>
+                </div>
+              ))}
+              {imageItems.map((image) => (
+                <div
+                  key={image.id}
+                  className={`field-item ${activeImageId === image.id ? 'selected' : ''}`}
+                  onClick={() => { commitActiveEditingDraft(); setIsEditingText(false); setActiveFieldId(null); setActiveImageId(image.id); }}
+                >
+                  <div className="field-icon img-icon">IMG</div>
+                  <div className="field-info">
+                    <div className="field-name">{image.name || 'Image'}</div>
+                    <div className="field-meta">image · layer</div>
+                  </div>
+                </div>
+              ))}
+              {fields.length === 0 && imageItems.length === 0 && (
+                <div className="fields-empty">
+                  <p>No layers yet. Create fields or place images to see them here.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* CANVAS */}
+        <div className="canvas-area" id="canvasArea">
+          <input
+            ref={templateInputRef}
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg,.json,.certproj"
+            className="hidden-file-input"
+            onChange={handleWorkspaceBrowseFile}
+          />
+
+          {/* Scrollable body — centred when small, scrollable when large */}
+          <div className="canvas-scroll-body">
+          {!template && (
+            <div className="drop-overlay">
+              <div className="drop-zone" onClick={() => templateInputRef.current?.click()}>
+                <div className="drop-icon">📄</div>
+                <div className="drop-title">Open a Template or Project</div>
+                <div className="drop-sub">Import a PDF or image to use as your certificate background, or load a saved project JSON to resume editing.</div>
+                <button className="btn-browse" type="button">Browse File</button>
+                <div className="drop-formats">PDF · PNG · JPG · JSON PROJECT</div>
+              </div>
+            </div>
+          )}
+
+          {template && (
+            <div
+              className="canvas-wrapper"
+              style={{
+                width: template.displayWidth * zoom,
+                height: template.displayHeight * zoom,
+              }}
+            >
+              <div
+                className="template-layer"
+                ref={layerRef}
+                style={{
+                  width: template.displayWidth,
+                  height: template.displayHeight,
+                  transform: `scale(${zoom})`,
+                  transformOrigin: 'top left',
+                }}
+                onMouseDown={beginDraw}
+                onMouseMove={moveDraw}
+                onMouseUp={endDraw}
+              >
+                <img src={template.src} alt="Template" draggable={false} className="template-image" />
+
+                {fields.map((field) => {
+                  const sampleText = sampleValues[field.name] ?? `{${field.name}}`;
+                  const committedHtml = sampleHtmlValues[field.name];
+                  const fallbackHtml = plainTextToHtml(sampleText);
+                  const displayHtml = committedHtml ?? fallbackHtml;
+                  const isCsvMappedField = useCsv && Boolean(fieldMappings[field.name]);
+                  const hoveredColorArray = colorHoverValue ? hexToColorArray(colorHoverValue) : field.color;
+                  const previewSizePt = activeFieldId === field.id && sizeHoverValue ? Number(sizeHoverValue) : Number(field.size);
+                  const previewFontPx = (previewSizePt / template.pageHeightPt) * template.displayHeight;
+                  const fittedPx = field.maxWidth ? fitSizeForPreview(sampleText, field.w, previewFontPx) : previewFontPx;
+                  const isActive = activeFieldId === field.id;
+                  const isInlineEditing = isActive && isEditingText && !isCsvMappedField;
+                  const previewFontToken = isActive && fontHoverFamily ? fontHoverFamily : field.font;
+                  const previewFontCss = resolveFontTokenToCss(previewFontToken);
+                  const previewColor = isActive ? hoveredColorArray : field.color;
+
+                  return (
+                    <div
+                      key={field.id}
+                      className={`field-box ${isActive ? 'active' : ''}`}
+                      style={{ left: field.x, top: field.y, width: field.w, height: field.h }}
+                      onMouseDown={(event) => {
+                        const target = event.target;
+                        if (!(target instanceof HTMLElement)) return;
+                        const isResizeHandle = !!target.closest('.resize-handle');
+                        if (isResizeHandle) return;
+                        const previewEl = target.closest('.field-preview');
+                        if (previewEl) {
+                          event.stopPropagation();
+                          if (!isActive) {
+                            // First click on an inactive field: select it and arm for dragging.
+                            // Don't enter text-edit mode yet — that happens on a second click.
+                            if (isCsvMappedField) { setActiveFieldId(field.id); setActiveImageId(null); return; }
+                            beginMove(event, field.id);
+                            return;
+                          }
+                          // Field is already active — second click enters text-editing mode.
+                          setActiveFieldId(field.id);
+                          setActiveImageId(null);
+                          if (isCsvMappedField) { setIsEditingText(false); setStatus(`"${field.name}" is mapped to CSV column "${fieldMappings[field.name]}" and is read-only.`); return; }
+                          const isSameEditingField = isEditingText && editingDraftRef.current.name === field.name;
+                          if (!isSameEditingField) { editingDraftRef.current = { name: field.name, html: displayHtml, text: sampleText }; lastSelectionRangeRef.current = null; }
+                          setIsEditingText(true);
+                          setTimeout(() => { if (previewEl instanceof HTMLElement) previewEl.focus(); }, 0);
+                          return;
+                        }
+                        beginMove(event, field.id);
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const target = event.target;
+                        if (!(target instanceof HTMLElement)) return;
+                        if (!target.closest('.field-preview') && !target.closest('.resize-handle')) { commitActiveEditingDraft(); setActiveFieldId(field.id); setActiveImageId(null); setIsEditingText(false); }
+                      }}
+                      onDoubleClick={(event) => {
+                        const target = event.target;
+                        if (!(target instanceof HTMLElement)) return;
+                        if (target.closest('.field-preview') && !isCsvMappedField) {
+                          // Double-click on text area: enter editing directly
+                          const previewEl = target.closest('.field-preview');
+                          const isSameEditingField = isEditingText && editingDraftRef.current.name === field.name;
+                          if (!isSameEditingField) { editingDraftRef.current = { name: field.name, html: displayHtml, text: sampleText }; lastSelectionRangeRef.current = null; }
+                          setActiveFieldId(field.id);
+                          setActiveImageId(null);
+                          setIsEditingText(true);
+                          setTimeout(() => { if (previewEl instanceof HTMLElement) previewEl.focus(); }, 0);
+                          return;
+                        }
+                        if (!target.closest('.field-preview') && !target.closest('.resize-handle')) { handleFieldDoubleClick(field); }
+                      }}
+                    >
+                      <div
+                        className={`field-preview align-${field.align}`}
+                        contentEditable={isInlineEditing}
+                        suppressContentEditableWarning={true}
+                        spellCheck={false}
+                        ref={(node) => {
+                          if (!node || !isInlineEditing) return;
+                          const expectedName = editingDraftRef.current.name === field.name ? editingDraftRef.current.name : null;
+                          if (!expectedName) return;
+                          const shouldSeed = node.dataset.editingField !== expectedName || !node.innerHTML || node.innerHTML === '<br>';
+                          if (shouldSeed) { node.innerHTML = editingDraftRef.current.html ?? displayHtml; node.dataset.editingField = expectedName; }
+                        }}
+                        style={{
+                          fontSize: fittedPx,
+                          fontFamily: previewFontCss.family || previewFontToken,
+                          color: colorArrayToCss(previewColor),
+                          fontWeight: field.bold ? 'bold' : (previewFontCss.weight || 'normal'),
+                          fontStyle: field.italic ? 'italic' : (previewFontCss.style || 'normal'),
+                          whiteSpace: field.wrapText ? 'pre-wrap' : 'pre',
+                          overflowWrap: field.wrapText ? 'break-word' : 'normal',
+                          wordWrap: field.wrapText ? 'break-word' : 'normal',
+                          cursor: isCsvMappedField ? 'default' : (isInlineEditing ? 'text' : 'move'),
+                        }}
+                        onInput={(event) => {
+                          if (isInlineEditing) {
+                            const nextText = event.currentTarget.innerText;
+                            const nextHtml = sanitizeHtml(event.currentTarget.innerHTML);
+                            editingDraftRef.current = { name: field.name, html: nextHtml, text: nextText };
+                            setSampleValues((prev) => ({ ...prev, [field.name]: nextText }));
+                            setSampleHtmlValues((prev) => ({ ...prev, [field.name]: nextHtml }));
+                          }
+                        }}
+                        onMouseDown={(event) => { if (isActive && isEditingText) event.stopPropagation(); }}
+                        onMouseUp={(event) => {
+                          if (!(isActive && isEditingText)) return;
+                          const selection = window.getSelection();
+                          if (selection && !selection.isCollapsed && selection.rangeCount > 0 && selectionInsideEditor(event.currentTarget, selection)) {
+                            lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+                          }
+                        }}
+                        onKeyUp={(event) => {
+                          if (!(isActive && isEditingText)) return;
+                          const selection = window.getSelection();
+                          if (selection && !selection.isCollapsed && selection.rangeCount > 0 && selectionInsideEditor(event.currentTarget, selection)) {
+                            lastSelectionRangeRef.current = selection.getRangeAt(0).cloneRange();
+                          }
+                        }}
+                        onBlur={(event) => {
+                          const nextTarget = event.relatedTarget;
+                          const activeElement = document.activeElement;
+                          const keepEditingByToolbarFocus = nextTarget instanceof HTMLElement && !!nextTarget.closest('.toolbar');
+                          const keepEditingByActiveElement = activeElement instanceof HTMLElement && !!activeElement.closest('.toolbar');
+                          const keepEditing = toolbarInteractionRef.current || keepEditingByToolbarFocus || keepEditingByActiveElement;
+                          if (keepEditing) return;
+                          commitFieldDraft(field.name);
+                          lastSelectionRangeRef.current = null;
+                          setIsEditingText(false);
+                        }}
+                        dangerouslySetInnerHTML={isInlineEditing ? undefined : { __html: displayHtml }}
+                      >
+                        {null}
                       </div>
-                      <div className="section-divider"></div>
-                      <span className="label-title">Field Mappings</span>
-                      {fields.length > 0 ? (
+                      <span className="resize-handle resize-handle-nw" onMouseDown={(event) => beginResize(event, field.id, 'nw')} />
+                      <span className="resize-handle resize-handle-n" onMouseDown={(event) => beginResize(event, field.id, 'n')} />
+                      <span className="resize-handle resize-handle-ne" onMouseDown={(event) => beginResize(event, field.id, 'ne')} />
+                      <span className="resize-handle resize-handle-e" onMouseDown={(event) => beginResize(event, field.id, 'e')} />
+                      <span className="resize-handle resize-handle-se" onMouseDown={(event) => beginResize(event, field.id, 'se')} />
+                      <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, field.id, 's')} />
+                      <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, field.id, 'sw')} />
+                      <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, field.id, 'w')} />
+                    </div>
+                  );
+                })}
+
+                {imageItems.map((image) => {
+                  const isActiveImage = activeImageId === image.id;
+                  return (
+                    <div
+                      key={image.id}
+                      className={`field-box image-box ${isActiveImage ? 'active' : ''}`}
+                      style={{ left: image.x, top: image.y, width: image.w, height: image.h }}
+                      onMouseDown={(event) => {
+                        const target = event.target;
+                        if (!(target instanceof HTMLElement)) return;
+                        if (target.closest('.resize-handle')) return;
+                        beginMove(event, image.id, 'image');
+                      }}
+                      onClick={(event) => { event.stopPropagation(); commitActiveEditingDraft(); setActiveImageId(image.id); setActiveFieldId(null); setIsEditingText(false); }}
+                    >
+                      <img src={image.src} alt={image.name || 'Layout image'} className="image-preview" draggable={false} />
+                      <span className="resize-handle resize-handle-nw" onMouseDown={(event) => beginResize(event, image.id, 'nw', 'image')} />
+                      <span className="resize-handle resize-handle-n" onMouseDown={(event) => beginResize(event, image.id, 'n', 'image')} />
+                      <span className="resize-handle resize-handle-ne" onMouseDown={(event) => beginResize(event, image.id, 'ne', 'image')} />
+                      <span className="resize-handle resize-handle-e" onMouseDown={(event) => beginResize(event, image.id, 'e', 'image')} />
+                      <span className="resize-handle resize-handle-se" onMouseDown={(event) => beginResize(event, image.id, 'se', 'image')} />
+                      <span className="resize-handle resize-handle-s" onMouseDown={(event) => beginResize(event, image.id, 's', 'image')} />
+                      <span className="resize-handle resize-handle-sw" onMouseDown={(event) => beginResize(event, image.id, 'sw', 'image')} />
+                      <span className="resize-handle resize-handle-w" onMouseDown={(event) => beginResize(event, image.id, 'w', 'image')} />
+                    </div>
+                  );
+                })}
+
+                {draftBox && (
+                  <div className="draft-box" style={{ left: draftBox.x, top: draftBox.y, width: draftBox.w, height: draftBox.h }} />
+                )}
+
+                {alignmentGuides.map((guide, idx) => (
+                  guide.type === 'vertical' ? (
+                    <div key={`guide-v-${idx}`} className="alignment-guide-vertical" style={{ position: 'absolute', left: guide.x, top: 0, width: 1, height: '100%', backgroundColor: '#00ff00', pointerEvents: 'none', zIndex: 1000 }} />
+                  ) : (
+                    <div key={`guide-h-${idx}`} className="alignment-guide-horizontal" style={{ position: 'absolute', left: 0, top: guide.y, width: '100%', height: 1, backgroundColor: '#00ff00', pointerEvents: 'none', zIndex: 1000 }} />
+                  )
+                ))}
+              </div>
+            </div>
+          )}
+          </div>{/* end canvas-scroll-body */}
+
+          <div className="canvas-controls">
+            <button type="button" className="canvas-ctrl-btn" data-tip="Fit to screen" onClick={() => {
+              const canvasEl = document.getElementById('canvasArea');
+              if (canvasEl && template) {
+                const availW = canvasEl.clientWidth - 96;
+                const availH = canvasEl.clientHeight - 96;
+                if (availW > 0 && availH > 0) {
+                  const fitZoom = Math.min(availW / template.displayWidth, availH / template.displayHeight, 1);
+                  setZoom(Math.max(0.25, parseFloat(fitZoom.toFixed(2))));
+                }
+              }
+            }}>⤢</button>
+            <button type="button" className="canvas-ctrl-btn" data-tip="Actual size" onClick={() => setZoom(1)}>1:1</button>
+          </div>
+        </div>
+
+        {/* RIGHT SIDEBAR */}
+        <div className="sidebar-right">
+          <div className="props-header">
+            <div>
+              <div className="props-title">Properties</div>
+              <div className="props-field-name">
+                {activeField?.name || activeImage?.name || 'No selection'}
+              </div>
+            </div>
+            {useCsv && csvFile && (
+              <span className="batch-badge">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+                CSV
+              </span>
+            )}
+          </div>
+
+          <div className="props-body">
+            {activeField && template && scales ? (
+              <>
+                {/* Position & Size */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Position & Size</div>
+                  <div className="prop-row-2col">
+                    <div className="prop-col">
+                      <div className="prop-col-label">X (pt)</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeField.x * scales.x)} onChange={(event) => updateField(activeField.id, { x: Number(event.target.value) / scales.x })} />
+                    </div>
+                    <div className="prop-col">
+                      <div className="prop-col-label">Y (pt)</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeField.y * scales.y)} onChange={(event) => updateField(activeField.id, { y: Number(event.target.value) / scales.y })} />
+                    </div>
+                  </div>
+                  <div className="prop-row-2col">
+                    <div className="prop-col">
+                      <div className="prop-col-label">Width</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeField.w * scales.x)} onChange={(event) => updateField(activeField.id, { w: Number(event.target.value) / scales.x })} />
+                    </div>
+                    <div className="prop-col">
+                      <div className="prop-col-label">Height</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeField.h * scales.y)} onChange={(event) => updateField(activeField.id, { h: Number(event.target.value) / scales.y })} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Typography */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Typography</div>
+                  <div className="prop-row">
+                    <div className="prop-label">Font</div>
+                    <select className="prop-input" style={{ flex: 1 }} value={activeField.font || 'Helvetica'} onChange={(event) => updateField(activeField.id, { font: event.target.value })}>
+                      {fontPickerGroups.builtIn.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+                      {fontPickerGroups.custom.length > 0 && fontPickerGroups.custom.map((f) => <option key={f.name} value={f.name}>{f.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="prop-row">
+                    <div className="prop-label">Size</div>
+                    <input className="prop-input mono" type="number" value={activeField.size || 12} style={{ flex: '0 0 60px' }} onChange={(event) => updateField(activeField.id, { size: Number(event.target.value) })} />
+                    <div className="toggle-group" style={{ marginLeft: 4 }}>
+                      <button type="button" className={`toggle-btn ${activeField.bold ? 'active' : ''}`} onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }} onClick={() => handleInlineStyleClick('bold', 'bold')}>B</button>
+                      <button type="button" className={`toggle-btn ${activeField.italic ? 'active' : ''}`} onMouseDown={(event) => { const editorEl = document.querySelector('.field-box.active .field-preview[contenteditable="true"]'); if (editorEl) event.preventDefault(); }} onClick={() => handleInlineStyleClick('italic', 'italic')} style={{ fontStyle: 'italic' }}>I</button>
+                    </div>
+                  </div>
+                  <div className="prop-row">
+                    <div className="prop-label">Align</div>
+                    <div className="align-group">
+                      <button type="button" className={`align-btn ${activeField.align === 'left' || !activeField.align ? 'active' : ''}`} data-tip="Left" onClick={() => updateField(activeField.id, { align: 'left' })}>L</button>
+                      <button type="button" className={`align-btn ${activeField.align === 'center' ? 'active' : ''}`} data-tip="Center" onClick={() => updateField(activeField.id, { align: 'center' })}>C</button>
+                      <button type="button" className={`align-btn ${activeField.align === 'right' ? 'active' : ''}`} data-tip="Right" onClick={() => updateField(activeField.id, { align: 'right' })}>R</button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Color */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Color</div>
+                  <div className="prop-row">
+                    <div className="prop-label">Text</div>
+                    <div className="color-row">
+                      <div className="color-preview-swatch" style={{ background: colorArrayToHex(activeField.color) }} />
+                      <input
+                        className="color-hex"
+                        type="color"
+                        value={colorArrayToHex(activeField.color)}
+                        onChange={(event) => applyInlineCommandOrFieldUpdate({ command: 'foreColor', value: event.target.value, fieldPatch: { color: hexToColorArray(event.target.value) }, requireSelection: true, selectionMessage: 'Select text to apply color.' })}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Behavior */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Behavior</div>
+                  <label className="checkbox-row" onClick={() => updateField(activeField.id, { maxWidth: !activeField.maxWidth })}>
+                    <div className={`custom-check ${activeField.maxWidth ? 'checked' : ''}`}>
+                      {activeField.maxWidth && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5"/></svg>}
+                    </div>
+                    <span className="check-label">Fit to width</span>
+                  </label>
+                  <label className="checkbox-row" onClick={() => updateField(activeField.id, { wrapText: !activeField.wrapText })}>
+                    <div className={`custom-check ${activeField.wrapText ? 'checked' : ''}`}>
+                      {activeField.wrapText && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5"/></svg>}
+                    </div>
+                    <span className="check-label">Wrap text</span>
+                  </label>
+                </div>
+
+                {/* Sample Content */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Sample Content</div>
+                  <textarea
+                    className="prop-textarea"
+                    value={sampleValues[activeField.name] ?? ''}
+                    disabled={activeFieldIsCsvMapped}
+                    onChange={(event) => {
+                      if (activeFieldIsCsvMapped) return;
+                      const nextValue = event.target.value;
+                      setSampleValues((prev) => ({ ...prev, [activeField.name]: nextValue }));
+                      setSampleHtmlValues((prev) => {
+                        if (!Object.prototype.hasOwnProperty.call(prev, activeField.name)) return prev;
+                        const next = { ...prev }; delete next[activeField.name]; return next;
+                      });
+                      if (editingDraftRef.current.name === activeField.name) {
+                        editingDraftRef.current = { name: activeField.name, text: nextValue, html: plainTextToHtml(nextValue) };
+                      }
+                    }}
+                    rows={3}
+                    placeholder={activeFieldIsCsvMapped ? 'Mapped to CSV — read-only' : 'Preview text…'}
+                  />
+                  {activeFieldIsCsvMapped && (
+                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>Mapped to: {fieldMappings[activeField.name]}</p>
+                  )}
+                  {useCsv && csvHeaders.length > 0 && (
+                    <div className="prop-row" style={{ marginTop: 10 }}>
+                      <div className="prop-label" style={{ fontSize: 10 }}>CSV col</div>
+                      <select className="prop-input" style={{ flex: 1, fontSize: 11 }} value={fieldMappings[activeField.name] || ''} onChange={(event) => updateFieldMapping(activeField.name, event.target.value)}>
+                        <option value="">— use preview value —</option>
+                        {csvHeaders.map((header) => <option key={header} value={header}>{header}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                <button type="button" className="danger-btn" onClick={() => deleteField(activeField.id)}>Delete field</button>
+              </>
+            ) : activeImage && template && scales ? (
+              <>
+                {/* Image Position & Size */}
+                <div className="prop-section">
+                  <div className="prop-section-label">Position & Size</div>
+                  <div className="prop-row-2col">
+                    <div className="prop-col">
+                      <div className="prop-col-label">X (pt)</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeImage.x * scales.x)} onChange={(event) => updateImage(activeImage.id, { x: Number(event.target.value) / scales.x })} />
+                    </div>
+                    <div className="prop-col">
+                      <div className="prop-col-label">Y (pt)</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeImage.y * scales.y)} onChange={(event) => updateImage(activeImage.id, { y: Number(event.target.value) / scales.y })} />
+                    </div>
+                  </div>
+                  <div className="prop-row-2col">
+                    <div className="prop-col">
+                      <div className="prop-col-label">Width</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeImage.w * scales.x)} onChange={(event) => updateImage(activeImage.id, { w: Number(event.target.value) / scales.x })} />
+                    </div>
+                    <div className="prop-col">
+                      <div className="prop-col-label">Height</div>
+                      <input className="prop-input mono" type="number" value={Math.round(activeImage.h * scales.y)} onChange={(event) => updateImage(activeImage.id, { h: Number(event.target.value) / scales.y })} />
+                    </div>
+                  </div>
+                </div>
+                <div className="prop-section">
+                  <div className="prop-section-label">Name</div>
+                  <div className="prop-row">
+                    <input className="prop-input" value={activeImage.name || ''} onChange={(event) => updateImage(activeImage.id, { name: event.target.value })} placeholder="Image name" />
+                  </div>
+                </div>
+                <button type="button" className="danger-btn" onClick={() => deleteImage(activeImage.id)}>Delete image</button>
+              </>
+            ) : (
+              <div className="props-empty">
+                <p>Select a field or image on the canvas to edit its properties.</p>
+              </div>
+            )}
+          </div>
+
+          {/* Preview */}
+          {previewUrl && (
+            <div className="preview-panel">
+              <div className="preview-panel-header">
+                Latest Preview
+                <button type="button" className="preview-open-link" onClick={() => window.open(previewUrl, '_blank', 'noopener,noreferrer')}>Open ↗</button>
+              </div>
+              <iframe title="Certificate preview" src={previewUrl} className="preview-frame" />
+            </div>
+          )}
+
+          {/* Data Source */}
+          <div className="data-section">
+            <div className="data-header">
+              <div className="data-title">Data Source</div>
+            </div>
+            <div className="data-csv-toggle" onClick={() => setUseCsv(!useCsv)}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: 'rgba(255,255,255,0.4)' }}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
+              <span className="csv-toggle-label">Use CSV data</span>
+              <div className={`toggle-switch ${useCsv ? 'on' : ''}`} />
+            </div>
+
+            {useCsv ? (
+              <>
+                <label className="upload-csv-btn">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  {csvFile ? csvFile.name : 'Upload CSV file'}
+                  <input type="file" accept=".csv" onChange={handleCsvFileChange} />
+                </label>
+                {csvFile && csvHeaders.length > 0 && (
+                  <div className="csv-headers-section">
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>CSV Columns</div>
+                    <div className="csv-headers-list">
+                      {csvHeaders.map((header, idx) => <span key={idx} className="csv-header-chip">{header}</span>)}
+                    </div>
+                    {fields.length > 0 && (
+                      <>
+                        <div className="section-divider" />
+                        <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Field Mappings</div>
                         <div className="field-mappings">
                           {fields.map((field) => (
                             <label key={field.id} className="mapping-row">
                               <span className="mapping-field-name">{field.name}</span>
-                              <select
-                                value={fieldMappings[field.name] || ''}
-                                onChange={(event) => updateFieldMapping(field.name, event.target.value)}
-                              >
-                                <option value="">-- Use preview value --</option>
-                                {csvHeaders.map((header) => (
-                                  <option key={header} value={header}>
-                                    {header}
-                                  </option>
-                                ))}
+                              <select value={fieldMappings[field.name] || ''} onChange={(event) => updateFieldMapping(field.name, event.target.value)}>
+                                <option value="">— preview —</option>
+                                {csvHeaders.map((header) => <option key={header} value={header}>{header}</option>)}
                               </select>
                             </label>
                           ))}
                         </div>
-                      ) : (
-                        <p className="hint">Create fields first to set up mappings</p>
-                      )}
-                    </div>
-                  )}
-                  {csvFile && csvHeaders.length === 0 && (
-                    <p className="hint">No headers found in CSV file</p>
-                  )}
-                </>
-              )}
-              {!useCsv && (
-                <p className="hint">Enable to generate PDFs from CSV rows</p>
-              )}
-            </div>
-          </div>
-
-          {activeField && template && scales && (
-            <div className={`panel ${panelState.selectedField ? '' : 'collapsed'}`}>
-              <div className="panel-header" onClick={() => togglePanel('selectedField')}>
-                <h2>Selected field</h2>
-                <div className="panel-actions">
-                  <button
-                    type="button"
-                    className="panel-toggle"
-                    data-state={panelState.selectedField ? 'open' : 'closed'}
-                    aria-label="Toggle selected field"
-                    onClick={(event) => {
-                      stopPanelToggle(event);
-                      togglePanel('selectedField');
-                    }}
-                  />
-                </div>
-              </div>
-              <div className="panel-body editor">
-                <label>
-                  <span className="label-title">Preview value</span>
-                  <textarea
-                    value={sampleValues[activeField.name] ?? ''}
-                    disabled={activeFieldIsCsvMapped}
-                    onChange={(event) => {
-                      if (activeFieldIsCsvMapped) {
-                        return;
-                      }
-                      const nextValue = event.target.value;
-                      setSampleValues((prev) => ({
-                        ...prev,
-                        [activeField.name]: nextValue,
-                      }));
-
-                      setSampleHtmlValues((prev) => {
-                        if (!Object.prototype.hasOwnProperty.call(prev, activeField.name)) {
-                          return prev;
-                        }
-                        const next = { ...prev };
-                        delete next[activeField.name];
-                        return next;
-                      });
-
-                      if (editingDraftRef.current.name === activeField.name) {
-                        editingDraftRef.current = {
-                          name: activeField.name,
-                          text: nextValue,
-                          html: plainTextToHtml(nextValue),
-                        };
-                      }
-                    }}
-                    rows={3}
-                    placeholder={activeFieldIsCsvMapped ? 'This field is mapped to CSV and is read-only' : 'Enter preview text (press Enter for new line)'}
-                  />
-                </label>
-                {activeFieldIsCsvMapped && (
-                  <p className="hint">Mapped to CSV column: {fieldMappings[activeField.name]}</p>
+                      </>
+                    )}
+                  </div>
                 )}
+                {csvFile && csvHeaders.length === 0 && (
+                  <p className="csv-hint">No headers found in CSV file.</p>
+                )}
+                {!csvFile && (
+                  <p className="csv-hint">Upload a CSV to generate a certificate per row.</p>
+                )}
+              </>
+            ) : (
+              <p className="csv-hint">Enable to generate certificates from CSV data.</p>
+            )}
+          </div>
+        </div>
+      </div>
 
-                <div className="grid-two">
-                  <label>
-                    <span className="label-title">X (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeField.x)}
-                      onChange={(event) => updateField(activeField.id, { x: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">Y (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeField.y)}
-                      onChange={(event) => updateField(activeField.id, { y: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">W (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeField.w)}
-                      onChange={(event) => updateField(activeField.id, { w: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">H (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeField.h)}
-                      onChange={(event) => updateField(activeField.id, { h: Number(event.target.value) })}
-                    />
-                  </label>
-                </div>
+      {/* ── STATUS BAR ── */}
+      <div className="statusbar">
+        <div className="status-item">
+          <div className={`status-dot ${statusInfo.type === 'error' ? 'error' : statusInfo.type === 'warning' ? 'warning' : ''}`} />
+          {statusInfo.text || 'Ready'}
+        </div>
+        {template && <div className="status-item">{Math.round(template.pageWidthPt)} × {Math.round(template.pageHeightPt)} pt</div>}
+        <div className="status-item">{fields.length} field{fields.length !== 1 ? 's' : ''} · {imageItems.length} image{imageItems.length !== 1 ? 's' : ''}</div>
+        <div style={{ flex: 1 }} />
+        {activeField && scales && <div className="status-item">x: {Math.round(activeField.x * scales.x)}  y: {Math.round(activeField.y * scales.y)}</div>}
+        <div className="status-item">zoom: {Math.round(zoom * 100)}%</div>
+      </div>
 
-                <div className="metrics">
-                  <div>
-                    Anchor X (pt):{' '}
-                    <strong>
-                      {(
-                        activeField.align === 'left'
-                          ? activeField.x * scales.x
-                          : activeField.align === 'center'
-                          ? (activeField.x + activeField.w / 2) * scales.x
-                          : (activeField.x + activeField.w) * scales.x
-                      ).toFixed(2)}
-                    </strong>
-                  </div>
-                  <div>
-                    Anchor Y (pt):{' '}
-                    <strong>
-                      {(((template.displayHeight - activeField.y) * scales.y) - Number(activeField.size)).toFixed(2)}
-                    </strong>
-                  </div>
-                  <div>
-                    max_width (pt): <strong>{(activeField.w * scales.x).toFixed(2)}</strong>
-                  </div>
-                </div>
-
-                <button type="button" className="danger" onClick={() => deleteField(activeField.id)}>
-                  Delete field
-                </button>
-              </div>
+      {/* ── SETTINGS DOCK ── */}
+      <div className="settings-dock">
+        <button
+          type="button"
+          className={`settings-trigger ${settingsMenuOpen ? 'open' : ''}`}
+          onClick={() => { const next = !settingsMenuOpen; setSettingsMenuOpen(next); if (!next) setSettingsTab(null); setInsertMenuOpen(false); setLayoutsMenuOpen(false); setGenerateMenuOpen(false); }}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M6.7 1.2h2.6l.5 1.8a5.6 5.6 0 011.3.8l1.8-.5 1.3 2.2-1.4 1.3c.1.3.1.7.1 1s0 .7-.1 1l1.4 1.3-1.3 2.2-1.8-.5a5.6 5.6 0 01-1.3.8l-.5 1.8H6.7l-.5-1.8a5.6 5.6 0 01-1.3-.8l-1.8.5-1.3-2.2L3.2 10a6.6 6.6 0 010-2L1.8 6.7l1.3-2.2 1.8.5c.4-.3.8-.5 1.3-.8l.5-1.8z"/>
+            <circle cx="8" cy="8" r="2.2"/>
+          </svg>
+          Settings
+        </button>
+        {settingsMenuOpen && (
+          <div className="settings-panel">
+            {/* ── Sidebar: submenu categories ── */}
+            <div className="settings-panel-sidebar">
+              <div className="settings-panel-sidebar-title">Settings</div>
+              <button
+                type="button"
+                className={`settings-panel-item ${settingsTab === 'fonts' ? 'active' : ''}`}
+                onClick={() => setSettingsTab(settingsTab === 'fonts' ? null : 'fonts')}
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M3 13V5l5-4 5 4v8"/><path d="M6 13V9h4v4"/></svg>
+                Fonts
+                {customFonts.length > 0 && <span className="nav-badge" style={{ marginLeft: 'auto' }}>{customFonts.length}</span>}
+              </button>
             </div>
-          )}
 
-          {activeImage && template && scales && (
-            <div className={`panel ${panelState.selectedField ? '' : 'collapsed'}`}>
-              <div className="panel-header">
-                <h2>Selected image</h2>
-              </div>
-              <div className="panel-body editor">
-                <label>
-                  <span className="label-title">Name</span>
-                  <input
-                    value={activeImage.name || ''}
-                    onChange={(event) => updateImage(activeImage.id, { name: event.target.value })}
-                  />
-                </label>
-                <div className="grid-two">
-                  <label>
-                    <span className="label-title">X (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeImage.x)}
-                      onChange={(event) => updateImage(activeImage.id, { x: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">Y (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeImage.y)}
-                      onChange={(event) => updateImage(activeImage.id, { y: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">W (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeImage.w)}
-                      onChange={(event) => updateImage(activeImage.id, { w: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span className="label-title">H (px)</span>
-                    <input
-                      type="number"
-                      value={Math.round(activeImage.h)}
-                      onChange={(event) => updateImage(activeImage.id, { h: Number(event.target.value) })}
-                    />
-                  </label>
+            {/* ── Content panel — only rendered when a tab is active ── */}
+            {settingsTab === 'fonts' && (
+              <div className="settings-panel-content">
+                <div className="settings-panel-content-header">
+                  <div className="settings-panel-content-title">Fonts</div>
                 </div>
-
-                <button type="button" className="danger" onClick={() => deleteImage(activeImage.id)}>
-                  Delete image
-                </button>
-              </div>
-            </div>
-          )}
-
-          {previewUrl && (
-            <div className={`panel ${panelState.preview ? '' : 'collapsed'}`}>
-              <div className="panel-header" onClick={() => togglePanel('preview')}>
-                <h2>Latest preview</h2>
-                <div className="panel-actions">
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={(event) => {
-                      stopPanelToggle(event);
-                      if (previewUrl) {
-                        window.open(previewUrl, '_blank', 'noopener,noreferrer');
-                      }
-                    }}
-                  >
-                    Open in tab
-                  </button>
-                  <button
-                    type="button"
-                    className="panel-toggle"
-                    data-state={panelState.preview ? 'open' : 'closed'}
-                    aria-label="Toggle preview"
-                    onClick={(event) => {
-                      stopPanelToggle(event);
-                      togglePanel('preview');
-                    }}
-                  />
+                <div className="settings-panel-content-body">
+                  <label className="nav-dropdown-item nav-dropdown-item--file">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M8 10V2M4 6l4-4 4 4"/><path d="M2 13v1a1 1 0 001 1h10a1 1 0 001-1v-1"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Install custom font…</span>
+                      <span className="nav-item-hint">Upload .ttf or .otf for PDF output</span>
+                    </span>
+                    <input type="file" accept=".ttf,.otf" onChange={async (event) => { const file = event.target.files?.[0]; if (file) { await uploadFont(file); event.target.value = ''; } }} />
+                  </label>
+                  <a href="https://fonts.google.com/" target="_blank" rel="noopener noreferrer" className="nav-dropdown-item nav-dropdown-item--link">
+                    <span className="nav-item-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><circle cx="8" cy="8" r="6"/><path d="M8 2v6l3 3"/></svg></span>
+                    <span className="nav-item-text">
+                      <span className="nav-item-label">Browse Google Fonts ↗</span>
+                      <span className="nav-item-hint">Download, then install here</span>
+                    </span>
+                  </a>
+                  {customFonts.length > 0 ? (
+                    <>
+                      <div className="nav-dropdown-section-title" style={{ padding: '12px 16px 6px' }}>Installed ({customFonts.length})</div>
+                      <div className="nav-font-list">
+                        {customFonts.map((font) => (
+                          <div key={font.file} className="nav-font-row">
+                            <div className="nav-font-info">
+                              <span className="nav-font-name" style={{ fontFamily: resolveFontTokenToCss(font.name).family || font.name }}>{font.name}</span>
+                              <span className="nav-font-meta">{font.file} · {font.size_kb} KB</span>
+                            </div>
+                            <button type="button" className="nav-font-delete" onClick={() => deleteFont(font.file)} data-tip={`Remove ${font.name}`}>
+                              <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 1l12 12M13 1L1 13"/></svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="nav-empty-hint">No custom fonts installed yet.</p>
+                  )}
                 </div>
               </div>
-              <div className="panel-body preview-body">
-                <iframe
-                  title="Certificate preview"
-                  src={previewUrl}
-                  className="preview-frame"
-                />
-              </div>
-            </div>
-          )}
-        </aside>
-      </main>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── ZIP DOWNLOAD NAME MODAL ── */}
+      {zipNameModal.open && (
+        <ZipNameModal
+          suggestedName={zipNameModal.suggestedName}
+          onConfirm={confirmZipDownload}
+          onCancel={() => setZipNameModal((prev) => ({ ...prev, open: false }))}
+        />
+      )}
     </div>
   );
 }
