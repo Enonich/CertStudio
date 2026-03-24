@@ -1,5 +1,10 @@
-pypdf
-reportlab
-pymupdf
-fastapi
-uvicorn
+aiofiles==25.1.0
+cryptography>=43.0.0
+fastapi==0.133.1
+pymupdf==1.27.1
+pypdf==6.7.3
+pytest==8.3.5
+python-dotenv==1.1.0
+python-multipart==0.0.22
+reportlab==4.4.10
+uvicorn==0.41.0

@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CertStudio — Sign In</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,700;1,400;1,600&family=Lato:wght@300;400;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --ink: #1a1208;
+  --ink-60: rgba(26,18,8,0.6);
+  --ink-30: rgba(26,18,8,0.3);
+  --ink-10: rgba(26,18,8,0.08);
+  --parchment: #f8f4ec;
+  --parchment-2: #f0eadb;
+  --gold: #b8892a;
+  --gold-light: #d4a84b;
+  --gold-pale: #f0d898;
+  --panel-dark: #12100c;
+  --warm-white: #fdfaf4;
+  --accent: #2a5ba8;
+  --error: #c0392b;
+  --success-g: #1a6b45;
+}
+
+html, body {
+  height: 100%; width: 100%;
+  font-family: 'Lato', sans-serif;
+  background: var(--panel-dark);
+  overflow: hidden;
+}
+
+/* ─── LAYOUT ─── */
+.page {
+  display: flex; height: 100vh; width: 100vw;
+}
+
+/* ─── LEFT PANEL ─── */
+.left-panel {
+  flex: 0 0 58%;
+  background: var(--panel-dark);
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+
+/* Layered background */
+.left-bg {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 70% 60% at 30% 40%, rgba(184,137,42,0.12) 0%, transparent 65%),
+    radial-gradient(ellipse 50% 50% at 75% 70%, rgba(42,91,168,0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 80% 80% at 50% 50%, #1c1710 0%, #0d0c09 100%);
+}
+
+/* Grain overlay */
+.left-bg::after {
+  content: '';
+  position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  opacity: 0.4; pointer-events: none;
+}
+
+/* Geometric corner ornaments */
+.corner-ornament {
+  position: absolute; width: 120px; height: 120px;
+  pointer-events: none; opacity: 0.15;
+}
+.corner-ornament svg { width: 100%; height: 100%; }
+.corner-tl { top: 24px; left: 24px; }
+.corner-br { bottom: 24px; right: 24px; transform: rotate(180deg); }
+
+/* Floating cert cards */
+.cert-float-bg {
+  position: absolute; inset: 0; pointer-events: none;
+}
+
+.cert-card {
+  position: absolute;
+  background: linear-gradient(145deg, #fdfbf5 0%, #f5edd8 100%);
+  border-radius: 4px;
+  box-shadow:
+    0 4px 24px rgba(0,0,0,0.4),
+    0 1px 0 rgba(255,255,255,0.05) inset,
+    0 0 0 1px rgba(184,137,42,0.2);
+  transform-origin: center;
+  animation: floatCard linear infinite;
+  opacity: 0;
+}
+
+.cert-card::before {
+  content: '';
+  position: absolute; inset: 8px;
+  border: 1px solid rgba(184,137,42,0.2);
+  pointer-events: none;
+}
+
+.cert-card-1 {
+  width: 200px; height: 142px;
+  top: 12%; left: 6%;
+  animation-duration: 22s; animation-delay: 0s;
+}
+.cert-card-2 {
+  width: 170px; height: 120px;
+  top: 55%; left: 2%;
+  animation-duration: 28s; animation-delay: -6s;
+}
+.cert-card-3 {
+  width: 185px; height: 132px;
+  top: 75%; left: 18%;
+  animation-duration: 20s; animation-delay: -10s;
+}
+.cert-card-4 {
+  width: 175px; height: 125px;
+  top: 5%; right: 5%;
+  animation-duration: 25s; animation-delay: -3s;
+}
+.cert-card-5 {
+  width: 155px; height: 110px;
+  top: 40%; right: 2%;
+  animation-duration: 32s; animation-delay: -15s;
+}
+
+@keyframes floatCard {
+  0%   { opacity: 0; transform: translateY(0px) rotate(-2deg); }
+  8%   { opacity: 0.55; }
+  50%  { opacity: 0.45; transform: translateY(-18px) rotate(1deg); }
+  92%  { opacity: 0.55; }
+  100% { opacity: 0; transform: translateY(-36px) rotate(-2deg); }
+}
+
+.cert-card-inner {
+  padding: 14px;
+  height: 100%;
+  display: flex; flex-direction: column;
+}
+.cert-card-pre {
+  font-family: 'Lato', sans-serif; font-size: 6px;
+  letter-spacing: 2px; text-transform: uppercase; color: rgba(100,70,20,0.5);
+  margin-bottom: 4px;
+}
+.cert-card-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 13px; color: #2a1a06; line-height: 1.3;
+}
+.cert-card-line {
+  margin-top: auto; width: 60%; height: 1px;
+  background: rgba(184,137,42,0.3);
+}
+.cert-card-name {
+  margin-top: 6px;
+  font-family: 'Playfair Display', serif;
+  font-size: 10px; font-style: italic; color: rgba(40,25,8,0.7);
+}
+
+/* ─── MAIN CERT (center showcase) ─── */
+.main-cert-wrap {
+  position: relative; z-index: 10;
+  display: flex; flex-direction: column; align-items: center;
+}
+
+.main-cert {
+  width: 420px; height: 298px;
+  background: linear-gradient(160deg, #fdfbf5 0%, #f6edda 100%);
+  border-radius: 4px;
+  box-shadow:
+    0 32px 80px rgba(0,0,0,0.6),
+    0 4px 16px rgba(0,0,0,0.3),
+    0 0 0 1px rgba(184,137,42,0.25);
+  position: relative; overflow: hidden;
+  animation: certAppear 1.2s cubic-bezier(0.16,1,0.3,1) both;
+}
+
+@keyframes certAppear {
+  from { opacity:0; transform: scale(0.88) translateY(24px); }
+  to   { opacity:1; transform: none; }
+}
+
+/* Certificate background watermark */
+.main-cert::before {
+  content: 'CS';
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  font-family: 'Playfair Display', serif;
+  font-size: 160px; font-weight: 700;
+  color: rgba(184,137,42,0.04); pointer-events: none;
+  user-select: none;
+}
+
+.cert-border-outer {
+  position: absolute; inset: 12px;
+  border: 1.5px solid rgba(184,137,42,0.25);
+  pointer-events: none;
+}
+.cert-border-inner {
+  position: absolute; inset: 18px;
+  border: 0.5px solid rgba(184,137,42,0.12);
+  pointer-events: none;
+}
+
+/* Corner flourishes */
+.cert-corner {
+  position: absolute; width: 20px; height: 20px;
+  pointer-events: none;
+}
+.cert-corner svg { width: 100%; height: 100%; }
+.cert-corner.tl { top: 10px; left: 10px; }
+.cert-corner.tr { top: 10px; right: 10px; transform: scaleX(-1); }
+.cert-corner.bl { bottom: 10px; left: 10px; transform: scaleY(-1); }
+.cert-corner.br { bottom: 10px; right: 10px; transform: scale(-1); }
+
+.cert-content {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-start;
+  padding: 28px 36px 20px;
+}
+
+.cert-top-pre {
+  font-size: 7px; letter-spacing: 3px; text-transform: uppercase;
+  color: rgba(100,70,20,0.5); font-family: 'Lato', sans-serif;
+  font-weight: 700; margin-bottom: 4px;
+}
+
+.cert-main-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 22px; color: #1f1508; text-align: center; line-height: 1.2;
+  margin-bottom: 2px;
+}
+
+.cert-divider {
+  width: 80px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  margin: 8px auto;
+}
+
+.cert-presented-to {
+  font-size: 7px; letter-spacing: 2px; text-transform: uppercase;
+  color: rgba(100,70,20,0.4); margin-bottom: 6px;
+  font-family: 'Lato', sans-serif; font-weight: 700;
+}
+
+/* Typewriter name */
+.cert-name-display {
+  font-family: 'Playfair Display', serif;
+  font-size: 20px; font-style: italic; color: #2a1a06;
+  min-height: 28px; position: relative;
+  letter-spacing: 0.5px;
+}
+.cert-cursor {
+  display: inline-block; width: 2px; height: 20px;
+  background: var(--gold); vertical-align: middle; margin-left: 2px;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+
+.cert-body-text {
+  font-size: 7.5px; color: rgba(60,40,10,0.45); text-align: center;
+  line-height: 1.7; margin-top: 6px; max-width: 280px;
+  font-family: 'Lato', sans-serif;
+}
+
+.cert-sigs {
+  display: flex; justify-content: space-around; width: 100%;
+  margin-top: auto; padding-bottom: 4px;
+}
+.cert-sig { text-align: center; }
+.cert-sig-line { width: 80px; height: 1px; background: rgba(184,137,42,0.25); margin: 0 auto 4px; }
+.cert-sig-label { font-size: 6px; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(80,55,15,0.4); font-family: 'Lato', sans-serif; }
+
+/* Ribbon badge */
+.cert-badge {
+  position: absolute; top: -1px; right: 28px;
+  width: 36px; height: 44px;
+  background: linear-gradient(160deg, var(--gold-light) 0%, #9a6820 100%);
+  clip-path: polygon(0 0, 100% 0, 100% 85%, 50% 100%, 0 85%);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+.cert-badge::after {
+  content: '★';
+  color: rgba(255,255,255,0.9); font-size: 13px;
+}
+
+/* Stamp */
+.cert-stamp {
+  position: absolute; bottom: 26px; right: 44px;
+  width: 52px; height: 52px; border-radius: 50%;
+  border: 2px solid rgba(42,91,168,0.25);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-family: 'Lato', sans-serif;
+}
+.cert-stamp-inner {
+  font-size: 5.5px; letter-spacing: 1px; text-transform: uppercase;
+  color: rgba(42,91,168,0.4); text-align: center; line-height: 1.5;
+  font-weight: 700;
+}
+.cert-stamp::before {
+  content: '';
+  position: absolute; inset: 4px; border-radius: 50%;
+  border: 0.5px solid rgba(42,91,168,0.15);
+}
+
+/* Feature tags below cert */
+.cert-features {
+  display: flex; gap: 10px; margin-top: 24px;
+  animation: fadeUp 1s 0.6s cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+
+.feat-tag {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 20px;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  font-size: 11px; color: rgba(255,255,255,0.45); font-family: 'Lato', sans-serif;
+  letter-spacing: 0.2px;
+}
+.feat-tag-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+}
+
+/* Brand lockup bottom-left */
+.left-brand {
+  position: absolute; bottom: 28px; left: 32px;
+  display: flex; align-items: center; gap: 10px;
+  animation: fadeUp 1s 0.9s both;
+}
+.left-brand-mark {
+  width: 28px; height: 28px; border-radius: 7px;
+  background: linear-gradient(135deg, var(--gold-light) 0%, #7a5018 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Playfair Display', serif; font-size: 13px; color: #fff; font-weight: 700;
+}
+.left-brand-name {
+  font-family: 'Playfair Display', serif; font-size: 15px;
+  color: rgba(255,255,255,0.5); letter-spacing: -0.3px;
+}
+.left-brand-name span { color: var(--gold-light); }
+
+/* Social proof */
+.social-proof {
+  position: absolute; bottom: 30px; right: 32px;
+  text-align: right;
+  animation: fadeUp 1s 1.1s both;
+}
+.sp-number { font-family: 'Playfair Display', serif; font-size: 22px; color: rgba(255,255,255,0.7); }
+.sp-label { font-size: 10px; color: rgba(255,255,255,0.25); letter-spacing: 0.5px; font-family: 'Lato', sans-serif; }
+
+/* ─── RIGHT PANEL ─── */
+.right-panel {
+  flex: 0 0 42%;
+  background: var(--warm-white);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 48px 52px;
+  position: relative; overflow: hidden;
+}
+
+/* Subtle texture */
+.right-panel::before {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 100% 60% at 100% 0%, rgba(240,230,208,0.6) 0%, transparent 60%),
+    radial-gradient(ellipse 80% 80% at 0% 100%, rgba(240,230,208,0.3) 0%, transparent 60%);
+}
+
+.form-container {
+  width: 100%; max-width: 340px; position: relative; z-index: 1;
+  animation: formSlide 0.8s 0.2s cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes formSlide { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+
+/* Mode toggle */
+.mode-toggle {
+  display: flex; background: var(--parchment-2); border-radius: 10px;
+  padding: 3px; margin-bottom: 32px;
+  border: 1px solid rgba(184,137,42,0.15);
+}
+.mode-btn {
+  flex: 1; height: 34px; border: none; border-radius: 8px; cursor: pointer;
+  font-family: 'Lato', sans-serif; font-size: 13px; font-weight: 700;
+  letter-spacing: 0.3px; transition: all 0.2s;
+  background: none; color: var(--ink-30);
+}
+.mode-btn.active {
+  background: var(--warm-white); color: var(--ink);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.1), 0 0 0 1px rgba(184,137,42,0.2);
+}
+
+/* Heading */
+.form-eyebrow {
+  font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
+  color: var(--gold); font-family: 'Lato', sans-serif; font-weight: 700;
+  margin-bottom: 6px;
+}
+.form-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 30px; color: var(--ink); line-height: 1.1;
+  margin-bottom: 6px; letter-spacing: -0.5px;
+}
+.form-sub {
+  font-size: 13px; color: var(--ink-60); margin-bottom: 28px;
+  line-height: 1.5;
+}
+
+/* Google SSO */
+.btn-google {
+  width: 100%; height: 42px;
+  background: #fff; border: 1.5px solid rgba(26,18,8,0.12);
+  border-radius: 10px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-family: 'Lato', sans-serif; font-size: 13px; font-weight: 700;
+  color: var(--ink); transition: all 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  letter-spacing: 0.1px;
+}
+.btn-google:hover { border-color: rgba(26,18,8,0.25); box-shadow: 0 3px 12px rgba(0,0,0,0.1); transform: translateY(-1px); }
+
+.google-icon { width: 18px; height: 18px; }
+
+/* Divider */
+.or-divider {
+  display: flex; align-items: center; gap: 12px;
+  margin: 20px 0;
+}
+.or-divider::before, .or-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--ink-10);
+}
+.or-text { font-size: 11px; color: var(--ink-30); font-family: 'Lato', sans-serif; letter-spacing: 0.5px; font-weight: 700; }
+
+/* Form fields */
+.field-group { margin-bottom: 14px; }
+.field-row { display: flex; gap: 10px; }
+.field-row .field-group { flex: 1; }
+
+.field-label {
+  display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+  color: var(--ink-60); text-transform: uppercase; margin-bottom: 6px;
+  font-family: 'Lato', sans-serif;
+}
+
+.field-input-wrap { position: relative; }
+
+.field-input {
+  width: 100%; height: 42px; padding: 0 14px 0 40px;
+  background: var(--parchment); border: 1.5px solid rgba(26,18,8,0.1);
+  border-radius: 10px; font-family: 'Lato', sans-serif;
+  font-size: 14px; color: var(--ink); outline: none;
+  transition: all 0.2s; caret-color: var(--gold);
+}
+.field-input:focus {
+  border-color: rgba(184,137,42,0.5);
+  background: #fffdf7;
+  box-shadow: 0 0 0 3px rgba(184,137,42,0.1);
+}
+.field-input::placeholder { color: rgba(26,18,8,0.25); }
+.field-input.error { border-color: var(--error); background: #fff8f8; box-shadow: 0 0 0 3px rgba(192,57,43,0.08); }
+
+.field-icon {
+  position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+  color: rgba(26,18,8,0.25); pointer-events: none; transition: color 0.2s;
+}
+.field-input:focus ~ .field-icon,
+.field-input-wrap:focus-within .field-icon { color: var(--gold); }
+
+.field-input.no-icon { padding-left: 14px; }
+
+/* Password toggle */
+.pw-toggle {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: rgba(26,18,8,0.3);
+  padding: 4px; transition: color 0.15s;
+}
+.pw-toggle:hover { color: var(--ink); }
+.field-input.pw { padding-right: 40px; }
+
+/* Password strength */
+.pw-strength { display: flex; gap: 4px; margin-top: 6px; }
+.pw-bar { flex: 1; height: 3px; border-radius: 2px; background: var(--ink-10); transition: background 0.3s; }
+.pw-bar.weak { background: #e74c3c; }
+.pw-bar.ok { background: #e67e22; }
+.pw-bar.good { background: #27ae60; }
+.pw-label { font-size: 10px; color: var(--ink-30); margin-top: 3px; font-family: 'Lato', sans-serif; }
+
+/* Options row */
+.options-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 20px; margin-top: 2px;
+}
+.remember-label {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  font-size: 12px; color: var(--ink-60); font-family: 'Lato', sans-serif;
+  user-select: none;
+}
+.custom-check {
+  width: 16px; height: 16px; border-radius: 4px;
+  background: var(--parchment); border: 1.5px solid rgba(26,18,8,0.2);
+  display: flex; align-items: center; justify-content: center; transition: all 0.15s;
+}
+.custom-check.on { background: var(--gold); border-color: var(--gold); }
+.custom-check.on::after {
+  content: '';
+  width: 8px; height: 5px; border: 2px solid #fff;
+  border-top: none; border-right: none; transform: rotate(-45deg) translateY(-1px);
+  display: block;
+}
+.forgot-link {
+  font-size: 12px; color: var(--gold); font-family: 'Lato', sans-serif;
+  font-weight: 700; text-decoration: none; letter-spacing: 0.2px;
+  border-bottom: 1px solid transparent; transition: border-color 0.15s;
+}
+.forgot-link:hover { border-bottom-color: var(--gold); }
+
+/* Submit button */
+.btn-submit {
+  width: 100%; height: 44px;
+  background: linear-gradient(135deg, var(--gold-light) 0%, #8a5e14 100%);
+  border: none; border-radius: 10px; cursor: pointer;
+  color: #fff; font-family: 'Lato', sans-serif;
+  font-size: 14px; font-weight: 700; letter-spacing: 0.4px;
+  transition: all 0.25s;
+  box-shadow: 0 4px 20px rgba(184,137,42,0.35), 0 1px 0 rgba(255,255,255,0.15) inset;
+  position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn-submit::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.12) 50%, transparent 100%);
+  transform: translateX(-100%); transition: transform 0.5s;
+}
+.btn-submit:hover { box-shadow: 0 6px 28px rgba(184,137,42,0.5); transform: translateY(-1px); }
+.btn-submit:hover::before { transform: translateX(100%); }
+.btn-submit:active { transform: translateY(0); }
+
+/* Footer text */
+.form-footer {
+  text-align: center; margin-top: 20px;
+  font-size: 12px; color: var(--ink-30); font-family: 'Lato', sans-serif;
+}
+.form-footer a { color: var(--gold); font-weight: 700; text-decoration: none; }
+.form-footer a:hover { text-decoration: underline; }
+
+.terms-text {
+  margin-top: 16px;
+  font-size: 10.5px; color: rgba(26,18,8,0.25); font-family: 'Lato', sans-serif;
+  text-align: center; line-height: 1.5;
+}
+.terms-text a { color: rgba(26,18,8,0.4); }
+
+/* Right panel top logo (mobile fallback / branding) */
+.right-logo {
+  position: absolute; top: 28px; left: 52px;
+  display: flex; align-items: center; gap: 8px; opacity: 0.5;
+}
+.right-logo-mark {
+  width: 24px; height: 24px; border-radius: 6px;
+  background: linear-gradient(135deg, var(--gold-light) 0%, #8a5e14 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Playfair Display', serif; font-size: 11px; color: #fff; font-weight: 700;
+}
+.right-logo-name {
+  font-family: 'Playfair Display', serif; font-size: 14px; color: var(--ink-60);
+}
+
+/* Error message */
+.field-error {
+  font-size: 11px; color: var(--error); margin-top: 4px;
+  font-family: 'Lato', sans-serif; display: none;
+}
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(80px);
+  background: var(--ink); color: #fff; padding: 10px 20px; border-radius: 10px;
+  font-size: 13px; font-family: 'Lato', sans-serif; font-weight: 700;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.3); z-index: 1000;
+  transition: transform 0.3s cubic-bezier(0.16,1,0.3,1), opacity 0.3s;
+  display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  opacity: 0;
+}
+.toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+.toast-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success-g); flex-shrink: 0; }
+
+/* Sign-up-only fields (hidden in sign-in mode) */
+.signup-only { display: none; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- ─── LEFT PANEL ─── -->
+  <div class="left-panel">
+    <div class="left-bg"></div>
+
+    <!-- Corner ornaments -->
+    <div class="corner-ornament corner-tl">
+      <svg viewBox="0 0 80 80" fill="none">
+        <path d="M4 4 L4 28 M4 4 L28 4" stroke="rgba(184,137,42,0.6)" stroke-width="1.5" fill="none"/>
+        <path d="M12 12 L12 22 M12 12 L22 12" stroke="rgba(184,137,42,0.3)" stroke-width="0.75" fill="none"/>
+        <circle cx="4" cy="4" r="2" fill="rgba(184,137,42,0.6)"/>
+      </svg>
+    </div>
+    <div class="corner-ornament corner-br">
+      <svg viewBox="0 0 80 80" fill="none">
+        <path d="M4 4 L4 28 M4 4 L28 4" stroke="rgba(184,137,42,0.6)" stroke-width="1.5" fill="none"/>
+        <path d="M12 12 L12 22 M12 12 L22 12" stroke="rgba(184,137,42,0.3)" stroke-width="0.75" fill="none"/>
+        <circle cx="4" cy="4" r="2" fill="rgba(184,137,42,0.6)"/>
+      </svg>
+    </div>
+
+    <!-- Floating background cards -->
+    <div class="cert-float-bg">
+      <div class="cert-card cert-card-1">
+        <div class="cert-card-inner">
+          <div class="cert-card-pre">Certificate of Excellence</div>
+          <div class="cert-card-title">Advanced Web<br/>Development</div>
+          <div class="cert-card-line"></div>
+          <div class="cert-card-name">Sarah Johnson</div>
+        </div>
+      </div>
+      <div class="cert-card cert-card-2">
+        <div class="cert-card-inner">
+          <div class="cert-card-pre">Certificate of Completion</div>
+          <div class="cert-card-title">Data Science<br/>Fundamentals</div>
+          <div class="cert-card-line"></div>
+          <div class="cert-card-name">Marcus Chen</div>
+        </div>
+      </div>
+      <div class="cert-card cert-card-3">
+        <div class="cert-card-inner">
+          <div class="cert-card-pre">Award of Achievement</div>
+          <div class="cert-card-title">Project<br/>Management Pro</div>
+          <div class="cert-card-line"></div>
+          <div class="cert-card-name">Amira Osei</div>
+        </div>
+      </div>
+      <div class="cert-card cert-card-4">
+        <div class="cert-card-inner">
+          <div class="cert-card-pre">Certificate of Participation</div>
+          <div class="cert-card-title">UX Design<br/>Workshop 2024</div>
+          <div class="cert-card-line"></div>
+          <div class="cert-card-name">Lena Müller</div>
+        </div>
+      </div>
+      <div class="cert-card cert-card-5">
+        <div class="cert-card-inner">
+          <div class="cert-card-pre">Certificate of Merit</div>
+          <div class="cert-card-title">Machine<br/>Learning Mastery</div>
+          <div class="cert-card-line"></div>
+          <div class="cert-card-name">Tomás Rivera</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main certificate showcase -->
+    <div class="main-cert-wrap">
+      <div class="main-cert">
+        <div class="cert-border-outer"></div>
+        <div class="cert-border-inner"></div>
+
+        <div class="cert-corner tl">
+          <svg viewBox="0 0 20 20" fill="none">
+            <path d="M2 2 L2 8 M2 2 L8 2" stroke="rgba(184,137,42,0.5)" stroke-width="1" fill="none"/>
+            <circle cx="2" cy="2" r="1" fill="rgba(184,137,42,0.5)"/>
+          </svg>
+        </div>
+        <div class="cert-corner tr">
+          <svg viewBox="0 0 20 20" fill="none">
+            <path d="M2 2 L2 8 M2 2 L8 2" stroke="rgba(184,137,42,0.5)" stroke-width="1" fill="none"/>
+            <circle cx="2" cy="2" r="1" fill="rgba(184,137,42,0.5)"/>
+          </svg>
+        </div>
+        <div class="cert-corner bl">
+          <svg viewBox="0 0 20 20" fill="none">
+            <path d="M2 2 L2 8 M2 2 L8 2" stroke="rgba(184,137,42,0.5)" stroke-width="1" fill="none"/>
+            <circle cx="2" cy="2" r="1" fill="rgba(184,137,42,0.5)"/>
+          </svg>
+        </div>
+        <div class="cert-corner br">
+          <svg viewBox="0 0 20 20" fill="none">
+            <path d="M2 2 L2 8 M2 2 L8 2" stroke="rgba(184,137,42,0.5)" stroke-width="1" fill="none"/>
+            <circle cx="2" cy="2" r="1" fill="rgba(184,137,42,0.5)"/>
+          </svg>
+        </div>
+
+        <div class="cert-badge"></div>
+
+        <div class="cert-content">
+          <div class="cert-top-pre">This is to certify that</div>
+          <div class="cert-main-title">Certificate<br/>of Completion</div>
+          <div class="cert-divider"></div>
+          <div class="cert-presented-to">has been awarded to</div>
+          <div class="cert-name-display" id="certName">
+            <span id="certNameText"></span><span class="cert-cursor"></span>
+          </div>
+          <div class="cert-body-text">
+            For successfully completing the required coursework and demonstrating outstanding proficiency, this certificate is awarded in recognition of dedication and excellence.
+          </div>
+          <div class="cert-sigs">
+            <div class="cert-sig">
+              <div class="cert-sig-line"></div>
+              <div class="cert-sig-label">Program Director</div>
+            </div>
+            <div class="cert-sig">
+              <div class="cert-sig-line"></div>
+              <div class="cert-sig-label">Institution Head</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cert-stamp">
+          <div class="cert-stamp-inner">OFFICIAL<br/>SEAL<br/>2025</div>
+        </div>
+      </div>
+
+      <!-- Feature tags -->
+      <div class="cert-features">
+        <div class="feat-tag">
+          <div class="feat-tag-dot" style="background:var(--gold-light)"></div>
+          PDF Export
+        </div>
+        <div class="feat-tag">
+          <div class="feat-tag-dot" style="background:#5b9cf6"></div>
+          CSV Batch
+        </div>
+        <div class="feat-tag">
+          <div class="feat-tag-dot" style="background:#3ecf8e"></div>
+          Custom Fonts
+        </div>
+      </div>
+    </div>
+
+    <!-- Brand lockup -->
+    <div class="left-brand">
+      <div class="left-brand-mark">C</div>
+      <div class="left-brand-name">Cert<span>Studio</span></div>
+    </div>
+
+    <!-- Social proof -->
+    <div class="social-proof">
+      <div class="sp-number">48,000+</div>
+      <div class="sp-label">certificates generated</div>
+    </div>
+  </div>
+
+  <!-- ─── RIGHT PANEL ─── -->
+  <div class="right-panel">
+
+    <div class="right-logo">
+      <div class="right-logo-mark">C</div>
+      <div class="right-logo-name">CertStudio</div>
+    </div>
+
+    <div class="form-container">
+
+      <!-- Mode toggle -->
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="signinBtn" onclick="switchMode('signin')">Sign in</button>
+        <button class="mode-btn" id="signupBtn" onclick="switchMode('signup')">Create account</button>
+      </div>
+
+      <div class="form-eyebrow" id="formEyebrow">Welcome back</div>
+      <div class="form-title" id="formTitle">Sign in to<br/>CertStudio</div>
+      <div class="form-sub" id="formSub">Design and generate professional certificates in minutes.</div>
+
+      <!-- Google SSO -->
+      <button class="btn-google" onclick="handleGoogle()">
+        <svg class="google-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+          <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+          <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+          <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+        </svg>
+        Continue with Google
+      </button>
+
+      <div class="or-divider">
+        <span class="or-text">OR</span>
+      </div>
+
+      <!-- Sign-up only: name row -->
+      <div class="field-row signup-only" id="nameRow">
+        <div class="field-group">
+          <label class="field-label">First name</label>
+          <div class="field-input-wrap">
+            <input class="field-input no-icon" type="text" placeholder="Jane" id="firstName"/>
+          </div>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Last name</label>
+          <div class="field-input-wrap">
+            <input class="field-input no-icon" type="text" placeholder="Smith" id="lastName"/>
+          </div>
+        </div>
+      </div>
+
+      <!-- Email -->
+      <div class="field-group">
+        <label class="field-label">Email address</label>
+        <div class="field-input-wrap">
+          <input class="field-input" type="email" placeholder="you@example.com" id="emailInput" oninput="clearError(this)"/>
+          <svg class="field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 7 10-7"/></svg>
+        </div>
+        <div class="field-error" id="emailError">Please enter a valid email address.</div>
+      </div>
+
+      <!-- Password -->
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <div class="field-input-wrap">
+          <input class="field-input pw" type="password" placeholder="Enter your password" id="pwInput" oninput="checkPw(this)"/>
+          <svg class="field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          <button class="pw-toggle" onclick="togglePw()" id="pwToggleBtn" tabindex="-1">
+            <svg id="eyeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <div id="pwStrengthWrap" style="display:none">
+          <div class="pw-strength">
+            <div class="pw-bar" id="bar1"></div>
+            <div class="pw-bar" id="bar2"></div>
+            <div class="pw-bar" id="bar3"></div>
+            <div class="pw-bar" id="bar4"></div>
+          </div>
+          <div class="pw-label" id="pwLabel"></div>
+        </div>
+        <div class="field-error" id="pwError">Password must be at least 8 characters.</div>
+      </div>
+
+      <!-- Options row (sign-in only) -->
+      <div class="options-row" id="optionsRow">
+        <label class="remember-label" onclick="toggleCheck()">
+          <div class="custom-check" id="rememberCheck"></div>
+          Remember me
+        </label>
+        <a href="#" class="forgot-link">Forgot password?</a>
+      </div>
+
+      <!-- Submit -->
+      <button class="btn-submit" onclick="handleSubmit()" id="submitBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+        <span id="submitText">Sign In</span>
+      </button>
+
+      <!-- Footer -->
+      <div class="form-footer" id="formFooter">
+        Don't have an account? <a href="#" onclick="switchMode('signup'); return false;">Create one free</a>
+      </div>
+
+      <div class="terms-text">
+        By continuing, you agree to our <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast">
+  <span class="toast-dot"></span>
+  <span id="toastMsg">Signed in successfully!</span>
+</div>
+
+<script>
+  // ─── Typewriter for cert name ───
+  const names = ['Alexandra Reed','James Okonkwo','Mei Lin Zhang','Samuel Torres','Priya Nair','Oliver Bennett'];
+  let ni = 0, ci = 0, deleting = false, pausing = false;
+
+  function typeStep() {
+    const target = names[ni];
+    const el = document.getElementById('certNameText');
+
+    if (pausing) { pausing = false; setTimeout(typeStep, 1800); return; }
+
+    if (!deleting) {
+      if (ci <= target.length) {
+        el.textContent = target.slice(0, ci++);
+        setTimeout(typeStep, ci === target.length ? 0 : 65);
+        if (ci > target.length) { pausing = true; deleting = true; setTimeout(typeStep, 2000); }
+      }
+    } else {
+      if (ci > 0) {
+        el.textContent = target.slice(0, --ci);
+        setTimeout(typeStep, 38);
+      } else {
+        deleting = false; ni = (ni + 1) % names.length;
+        setTimeout(typeStep, 400);
+      }
+    }
+  }
+  setTimeout(typeStep, 1000);
+
+  // ─── Mode switching ───
+  let currentMode = 'signin';
+
+  function switchMode(mode) {
+    currentMode = mode;
+    const isSignup = mode === 'signup';
+
+    document.getElementById('signinBtn').classList.toggle('active', !isSignup);
+    document.getElementById('signupBtn').classList.toggle('active', isSignup);
+
+    document.querySelectorAll('.signup-only').forEach(el => el.style.display = isSignup ? 'flex' : 'none');
+    document.getElementById('nameRow').style.display = isSignup ? 'flex' : 'none';
+    document.getElementById('optionsRow').style.display = isSignup ? 'none' : 'flex';
+    document.getElementById('pwStrengthWrap').style.display = isSignup ? 'block' : 'none';
+
+    document.getElementById('formEyebrow').textContent = isSignup ? 'Get started free' : 'Welcome back';
+    document.getElementById('formTitle').innerHTML = isSignup ? 'Create your<br/>account' : 'Sign in to<br/>CertStudio';
+    document.getElementById('formSub').textContent = isSignup
+      ? 'Build and send beautiful certificates to your recipients.'
+      : 'Design and generate professional certificates in minutes.';
+    document.getElementById('submitText').textContent = isSignup ? 'Create Account' : 'Sign In';
+    document.getElementById('formFooter').innerHTML = isSignup
+      ? 'Already have an account? <a href="#" onclick="switchMode(\'signin\'); return false;">Sign in</a>'
+      : "Don't have an account? <a href=\"#\" onclick=\"switchMode('signup'); return false;\">Create one free</a>";
+  }
+
+  // ─── Password visibility ───
+  let pwVisible = false;
+  function togglePw() {
+    pwVisible = !pwVisible;
+    const input = document.getElementById('pwInput');
+    input.type = pwVisible ? 'text' : 'password';
+    document.getElementById('eyeIcon').innerHTML = pwVisible
+      ? '<path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24M1 1l22 22" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>'
+      : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+  }
+
+  // ─── Password strength ───
+  function checkPw(input) {
+    if (currentMode !== 'signup') return;
+    const val = input.value;
+    document.getElementById('pwStrengthWrap').style.display = val.length > 0 ? 'block' : 'none';
+    const bars = [document.getElementById('bar1'), document.getElementById('bar2'), document.getElementById('bar3'), document.getElementById('bar4')];
+    bars.forEach(b => { b.className = 'pw-bar'; });
+
+    let score = 0;
+    if (val.length >= 8) score++;
+    if (/[A-Z]/.test(val)) score++;
+    if (/[0-9]/.test(val)) score++;
+    if (/[^A-Za-z0-9]/.test(val)) score++;
+
+    const cls = score <= 1 ? 'weak' : score === 2 ? 'ok' : 'good';
+    const label = ['','Weak','Fair','Good','Strong'][score];
+    for (let i = 0; i < score; i++) bars[i].classList.add(cls);
+    document.getElementById('pwLabel').textContent = label;
+  }
+
+  // ─── Remember me ───
+  function toggleCheck() {
+    document.getElementById('rememberCheck').classList.toggle('on');
+  }
+
+  // ─── Validation ───
+  function clearError(input) { input.classList.remove('error'); }
+
+  function validate() {
+    let ok = true;
+    const email = document.getElementById('emailInput');
+    const pw = document.getElementById('pwInput');
+
+    if (!email.value.includes('@') || !email.value.includes('.')) {
+      email.classList.add('error');
+      document.getElementById('emailError').style.display = 'block';
+      ok = false;
+    } else {
+      document.getElementById('emailError').style.display = 'none';
+    }
+
+    if (pw.value.length < 6) {
+      pw.classList.add('error');
+      document.getElementById('pwError').style.display = 'block';
+      ok = false;
+    } else {
+      document.getElementById('pwError').style.display = 'none';
+    }
+
+    return ok;
+  }
+
+  // ─── Submit ───
+  function handleSubmit() {
+    if (!validate()) return;
+
+    const btn = document.getElementById('submitBtn');
+    btn.style.opacity = '0.7'; btn.style.pointerEvents = 'none';
+    document.getElementById('submitText').textContent = currentMode === 'signup' ? 'Creating account…' : 'Signing in…';
+
+    setTimeout(() => {
+      btn.style.opacity = ''; btn.style.pointerEvents = '';
+      document.getElementById('submitText').textContent = currentMode === 'signup' ? 'Create Account' : 'Sign In';
+      showToast(currentMode === 'signup' ? 'Account created! Welcome to CertStudio.' : 'Signed in successfully!');
+    }, 1400);
+  }
+
+  function handleGoogle() {
+    showToast('Redirecting to Google…');
+  }
+
+  // ─── Toast ───
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    document.getElementById('toastMsg').textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+</script>
+</body>
+</html>
