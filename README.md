@@ -1,8 +1,18 @@
+---
+title: CertStudio
+emoji: 🎓
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+short_description: Certificate layout designer and batch PDF generator
+---
+
 # CertStudio Certificate Generator
 
 CertStudio is a certificate layout and generation toolkit with:
 
-- A React visual mapper (`template-mapper-app`) for drawing text and image regions.
+- A React visual mapper (`frontend`) for drawing text and image regions.
 - A FastAPI server (`app_server.py`) that serves the UI and generation APIs.
 - A Python rendering engine (`certificate_overlay.py`) that generates PDF certificates.
 
@@ -10,14 +20,22 @@ It supports single-certificate generation and CSV batch generation (ZIP), custom
 
 ## Current Architecture
 
-- Frontend: React + Vite (`template-mapper-app`)
-- Backend: FastAPI (`app_server.py`)
-- PDF engine: ReportLab + pypdf (`certificate_overlay.py`)
-- Optional PDF inspection: PyMuPDF (`extract_template_coords.py` and extraction endpoints)
+- Frontend: React + Vite (`frontend`)
+- Backend: FastAPI (`backend/app_server.py`)
+- PDF engine: ReportLab + pypdf (`backend/certificate_overlay.py`)
+- Optional PDF inspection: PyMuPDF (`backend/extract_template_coords.py` and extraction endpoints)
 
 Coordinates use PDF points (`72 pt = 1 inch`) with bottom-left origin.
 
 ## Quick Start (Local)
+
+### 0) Environment variables (single file)
+
+Create a root `.env` file from `.env.example` and set:
+
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_JWT_SECRET`
 
 ### 1) Python setup
 
@@ -30,7 +48,7 @@ pip install -r requirements.txt
 ### 2) Frontend build
 
 ```powershell
-cd template-mapper-app
+cd frontend
 npm install
 npm run build
 cd ..
@@ -39,7 +57,7 @@ cd ..
 ### 3) Run server
 
 ```powershell
-uvicorn app_server:app --reload
+uvicorn backend.app_server:app --reload --reload-include .env
 ```
 
 Open: `http://127.0.0.1:8000`
@@ -57,8 +75,8 @@ If frontend assets are missing, `/` returns a `503` message with build instructi
   - Single PDF (template merged), or
   - Overlay-only PDF (for pre-printed stock), or
   - Batch ZIP from all CSV rows.
-- Save/load layout JSON via backend (`fields.json` + `fields_store/*.json`).
-- Upload, list, and delete custom `.ttf`/`.otf` fonts from the UI.
+- Save/load layout JSON via backend (`config/fields.json` + `config/fields_store/*.json`).
+- Upload, list, and delete custom `.ttf` fonts from the UI.
 - Extract font names from uploaded template PDFs.
 
 ## API Endpoints
@@ -81,16 +99,16 @@ Fonts:
 - `POST /api/upload-font`
 - `DELETE /api/delete-font/{filename}`
 
-## CLI Usage (`certificate_overlay.py`)
+## CLI Usage (`backend/certificate_overlay.py`)
 
 Use the engine directly without the UI.
 
 ### Overlay-only with CSV row
 
 ```powershell
-python certificate_overlay.py `
-  --fields fields.json `
-  --csv sample.csv `
+python backend/certificate_overlay.py `
+  --fields config/fields.json `
+  --csv data/samples/sample.csv `
   --row 0 `
   --output out/certificate_overlay_only.pdf `
   --overlay-only `
@@ -100,10 +118,10 @@ python certificate_overlay.py `
 ### Merge onto template PDF
 
 ```powershell
-python certificate_overlay.py `
-  --template certificate_template.pdf `
-  --fields fields.json `
-  --csv sample.csv `
+python backend/certificate_overlay.py `
+  --template assets/templates/certificate_template.pdf `
+  --fields config/fields.json `
+  --csv data/samples/sample.csv `
   --row 0 `
   --output out/certificate_full.pdf
 ```
@@ -111,10 +129,10 @@ python certificate_overlay.py `
 ### Batch from CSV (creates PDFs + ZIP)
 
 ```powershell
-python certificate_overlay.py `
-  --template certificate_template.pdf `
-  --fields fields.json `
-  --csv sample.csv `
+python backend/certificate_overlay.py `
+  --template assets/templates/certificate_template.pdf `
+  --fields config/fields.json `
+  --csv data/samples/sample.csv `
   --field-mappings field_mappings.json `
   --fixed-values fixed_values.json `
   --batch `
@@ -159,8 +177,8 @@ Image keys:
 To inspect template text positions and build starting coordinates:
 
 ```powershell
-python extract_template_coords.py `
-  --template certificate_template.pdf `
+python backend/extract_template_coords.py `
+  --template assets/templates/certificate_template.pdf `
   --page 0 `
   --contains "Certificate" `
   --output-json out/template_coords.json
@@ -169,8 +187,8 @@ python extract_template_coords.py `
 Or generate an annotated PDF:
 
 ```powershell
-python extract_template_coords.py `
-  --template certificate_template.pdf `
+python backend/extract_template_coords.py `
+  --template assets/templates/certificate_template.pdf `
   --page 0 `
   --annotate out/template_annotated.pdf
 ```
@@ -186,8 +204,14 @@ docker run --rm -p 7860:7860 certstudio
 
 Open: `http://127.0.0.1:7860`
 
+## Custom Font Support
+
+- Supported upload format: `.ttf` only.
+- `.otf` uploads are rejected because the current ReportLab `TTFont` path used by this project cannot reliably render many OTF/CFF fonts in generated PDFs.
+- Uploaded fonts are validated on the backend at install time; invalid or non-TrueType files are rejected with an error.
+- Custom `.ttf` fonts are auto-registered from `assets/fonts/` by filename stem.
+
 ## Notes
 
 - Built-in ReportLab Base-14 fonts are always available.
-- Custom fonts are auto-registered from `fonts/` by filename stem.
 - For print alignment, keep printer scaling at actual size (no fit-to-page).
