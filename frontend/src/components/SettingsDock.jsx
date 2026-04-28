@@ -1,35 +1,32 @@
-import { resolveFontTokenToCss } from '../lib/fontUtils';
+import { useEditorStore } from '../store/useEditorStore';
 
 /**
- * The settings gear button and its slide-out panel (fonts management, etc.)
+ * The settings gear button and its slide-out panel (profile, account).
  * rendered in the bottom-right corner of the editor.
  */
 export default function SettingsDock({
-  settingsMenuOpen,
-  setSettingsMenuOpen,
-  settingsTab,
-  setSettingsTab,
-  setInsertMenuOpen,
-  setLayoutsMenuOpen,
-  setGenerateMenuOpen,
-  setPrintMenuOpen,
-  customFonts,
-  uploadFont,
-  deleteFont,
+  session,
+  signOut,
 }) {
+  const {
+    settingsMenuOpen, setSettingsMenuOpen,
+    settingsTab, setSettingsTab,
+    theme, setTheme,
+    closeAllMenus,
+  } = useEditorStore();
   return (
     <div className="settings-dock">
       <button
         type="button"
         className={`settings-trigger ${settingsMenuOpen ? 'open' : ''}`}
+        aria-expanded={settingsMenuOpen}
+        aria-haspopup="true"
         onClick={() => {
           const next = !settingsMenuOpen;
           setSettingsMenuOpen(next);
           if (!next) setSettingsTab(null);
-          setInsertMenuOpen(false);
-          setLayoutsMenuOpen(false);
-          setGenerateMenuOpen(false);
-          setPrintMenuOpen(false);
+          closeAllMenus();
+          if (next) setSettingsMenuOpen(true);
         }}
       >
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -46,117 +43,87 @@ export default function SettingsDock({
             <div className="settings-panel-sidebar-title">Settings</div>
             <button
               type="button"
-              className={`settings-panel-item ${settingsTab === 'fonts' ? 'active' : ''}`}
-              onClick={() => setSettingsTab(settingsTab === 'fonts' ? null : 'fonts')}
+              className={`settings-panel-item ${settingsTab === 'profile' ? 'active' : ''}`}
+              onClick={() => setSettingsTab(settingsTab === 'profile' ? null : 'profile')}
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-                <path d="M3 13V5l5-4 5 4v8"/>
-                <path d="M6 13V9h4v4"/>
+                <circle cx="8" cy="5.5" r="2.5"/>
+                <path d="M2.5 13.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>
               </svg>
-              Fonts
-              {customFonts.length > 0 && (
-                <span className="nav-badge" style={{ marginLeft: 'auto' }}>{customFonts.length}</span>
-              )}
+              Profile
+            </button>
+            <button
+              type="button"
+              className={`settings-panel-item ${settingsTab === 'account' ? 'active' : ''}`}
+              onClick={() => setSettingsTab(settingsTab === 'account' ? null : 'account')}
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <rect x="2" y="2" width="12" height="12" rx="2"/>
+                <path d="M5 8h6M8 5v6"/>
+              </svg>
+              Account
             </button>
           </div>
 
-          {/* -- Content panel — only rendered when a tab is active -- */}
-          {settingsTab === 'fonts' && (
+          {/* -- Profile tab -- */}
+          {settingsTab === 'profile' && (
             <div className="settings-panel-content">
               <div className="settings-panel-content-header">
-                <div className="settings-panel-content-title">Fonts</div>
+                <div className="settings-panel-content-title">Profile</div>
               </div>
               <div className="settings-panel-content-body">
-                <label
-                  className="nav-dropdown-item nav-dropdown-item--file"
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      event.currentTarget.querySelector('input[type="file"]')?.click();
-                    }
-                  }}
-                >
-                  <span className="nav-item-icon">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-                      <path d="M8 10V2M4 6l4-4 4 4"/>
-                      <path d="M2 13v1a1 1 0 001 1h10a1 1 0 001-1v-1"/>
-                    </svg>
-                  </span>
-                  <span className="nav-item-text">
-                    <span className="nav-item-label">Add a custom font…</span>
-                    <span className="nav-item-hint">Upload a .TTF font file to use in your certificates</span>
-                  </span>
-                  <input
-                    type="file"
-                    accept=".ttf"
-                    tabIndex={-1}
-                    onChange={async (event) => {
-                      const file = event.target.files?.[0];
-                      if (file) {
-                        await uploadFont(file);
-                        event.target.value = '';
-                      }
-                    }}
-                  />
-                </label>
 
-                <a
-                  href="https://fonts.google.com/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="nav-dropdown-item nav-dropdown-item--link"
-                >
-                  <span className="nav-item-icon">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-                      <circle cx="8" cy="8" r="6"/>
-                      <path d="M8 2v6l3 3"/>
-                    </svg>
-                  </span>
-                  <span className="nav-item-text">
-                    <span className="nav-item-label">Browse Google Fonts</span>
-                    <span className="nav-item-hint">Download free fonts, then add them here</span>
-                  </span>
-                </a>
+                {/* Email (read-only) */}
+                <div className="settings-field-group">
+                  <div className="settings-field-label">Email</div>
+                  <div className="settings-field-value">{session?.user?.email ?? '—'}</div>
+                </div>
 
-                {customFonts.length > 0 ? (
-                  <>
-                    <div className="nav-dropdown-section-title" style={{ padding: '12px 16px 6px' }}>
-                      Your fonts ({customFonts.length})
-                    </div>
-                    <div className="nav-font-list">
-                      {customFonts.map((font) => (
-                        <div key={font.file} className="nav-font-row">
-                          <div className="nav-font-info">
-                            <span
-                              className="nav-font-name"
-                              style={{ fontFamily: resolveFontTokenToCss(font.name).family || font.name }}
-                            >
-                              {font.name}
-                            </span>
-                            <span className="nav-font-meta">{font.file} / {font.size_kb} KB</span>
-                          </div>
-                          <button
-                            type="button"
-                            className="nav-font-delete"
-                            onClick={() => deleteFont(font.file)}
-                            data-tip={`Remove ${font.name}`}
-                            aria-label={`Remove ${font.name}`}
-                          >
-                            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-                              <path d="M1 1l12 12M13 1L1 13"/>
-                            </svg>
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  <p className="nav-empty-hint">
-                    No custom fonts added yet. Add a font to use it in your certificate designs.
-                  </p>
-                )}
+                {/* Theme */}
+                <div className="settings-field-group">
+                  <div className="settings-field-label">Theme</div>
+                  <div className="theme-toggle">
+                    {['dark', 'light'].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={`theme-pill${theme === t ? ' active' : ''}`}
+                        onClick={() => setTheme(t)}
+                      >
+                        {t.charAt(0).toUpperCase() + t.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          )}
+
+          {/* -- Account tab -- */}
+          {settingsTab === 'account' && (
+            <div className="settings-panel-content">
+              <div className="settings-panel-content-header">
+                <div className="settings-panel-content-title">Account</div>
+              </div>
+              <div className="settings-panel-content-body">
+                <div className="settings-field-group">
+                  <div className="settings-field-label">Signed in as</div>
+                  <div className="settings-field-value">{session?.user?.email ?? '—'}</div>
+                </div>
+                <div style={{ padding: '8px 16px 4px' }}>
+                  <button
+                    type="button"
+                    className="settings-signout-btn"
+                    onClick={() => { setSettingsMenuOpen(false); setSettingsTab(null); signOut(); }}
+                  >
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M10 3h3a1 1 0 011 1v8a1 1 0 01-1 1h-3"/>
+                      <path d="M7 11l3-3-3-3M10 8H2"/>
+                    </svg>
+                    Sign out
+                  </button>
+                </div>
               </div>
             </div>
           )}

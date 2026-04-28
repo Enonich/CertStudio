@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEditorStore } from '../store/useEditorStore';
 
-export function useStatus(isGenerating) {
+export function useStatus() {
+  const isGenerating = useEditorStore((s) => s.isGenerating);
   const [statusInfo, setStatusInfo] = useState({ text: '', type: 'info' });
   const statusTimeoutRef = useRef(null);
 

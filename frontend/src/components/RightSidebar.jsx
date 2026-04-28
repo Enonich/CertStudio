@@ -11,6 +11,7 @@ export default function RightSidebar({
   sampleValues,
   fieldMappings,
   useCsv,
+  csvFile,
   previewUrl,
   fields,
   activeFieldIsCsvMapped,
@@ -33,6 +34,7 @@ export default function RightSidebar({
   setActiveEditorFont,
   handleInlineStyleClick,
   getFieldDisplayName,
+  downloadLatestFile,
 }) {
   const hasMultiSelection = selectionCount > 1;
 
@@ -49,7 +51,7 @@ export default function RightSidebar({
                 : (activeImage?.name || 'No selection')}
           </div>
         </div>
-        {useCsv && (
+        {useCsv && csvFile && (
           <span className="batch-badge">
             <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
             Batch
@@ -101,21 +103,21 @@ export default function RightSidebar({
                 <div className="prop-section-content">
                   <div className="prop-row-2col">
                     <div className="prop-col">
-                      <div className="prop-col-label">Left</div>
+                      <div className="prop-col-label">Left<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeField.x * scales.x)} onChange={(event) => updateField(activeField.id, { x: Number(event.target.value) / scales.x })} />
                     </div>
                     <div className="prop-col">
-                      <div className="prop-col-label">Top</div>
+                      <div className="prop-col-label">Top<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeField.y * scales.y)} onChange={(event) => updateField(activeField.id, { y: Number(event.target.value) / scales.y })} />
                     </div>
                   </div>
                   <div className="prop-row-2col">
                     <div className="prop-col">
-                      <div className="prop-col-label">Width</div>
+                      <div className="prop-col-label">Width<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeField.w * scales.x)} onChange={(event) => updateField(activeField.id, { w: Number(event.target.value) / scales.x })} />
                     </div>
                     <div className="prop-col">
-                      <div className="prop-col-label">Height</div>
+                      <div className="prop-col-label">Height<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeField.h * scales.y)} onChange={(event) => updateField(activeField.id, { h: Number(event.target.value) / scales.y })} />
                     </div>
                   </div>
@@ -210,9 +212,15 @@ export default function RightSidebar({
                   <div className="prop-row">
                     <div className="prop-label">Align</div>
                     <div className="align-group">
-                      <button type="button" className={`align-btn ${activeField.align === 'left' || !activeField.align ? 'active' : ''}`} data-tip="Left" onClick={() => updateField(activeField.id, { align: 'left' })}>L</button>
-                      <button type="button" className={`align-btn ${activeField.align === 'center' ? 'active' : ''}`} data-tip="Center" onClick={() => updateField(activeField.id, { align: 'center' })}>C</button>
-                      <button type="button" className={`align-btn ${activeField.align === 'right' ? 'active' : ''}`} data-tip="Right" onClick={() => updateField(activeField.id, { align: 'right' })}>R</button>
+                      <button type="button" aria-label="Align left" className={`align-btn ${activeField.align === 'left' || !activeField.align ? 'active' : ''}`} data-tip="Left" onClick={() => updateField(activeField.id, { align: 'left' })}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
+                      </button>
+                      <button type="button" aria-label="Align center" className={`align-btn ${activeField.align === 'center' ? 'active' : ''}`} data-tip="Center" onClick={() => updateField(activeField.id, { align: 'center' })}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="10" x2="6" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="18" y1="18" x2="6" y2="18"/></svg>
+                      </button>
+                      <button type="button" aria-label="Align right" className={`align-btn ${activeField.align === 'right' ? 'active' : ''}`} data-tip="Right" onClick={() => updateField(activeField.id, { align: 'right' })}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="21" y1="10" x2="7" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="7" y2="18"/></svg>
+                      </button>
                     </div>
                   </div>
                   <div className="prop-row">
@@ -224,7 +232,7 @@ export default function RightSidebar({
                           type="color"
                           value={colorArrayToHex(activeField.color)}
                           onChange={(event) => applyInlineCommandOrFieldUpdate({ command: 'foreColor', value: event.target.value, fieldPatch: { color: hexToColorArray(event.target.value) }, requireSelection: true, selectionMessage: 'Select text to apply color.' })}
-                          style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+                          style={{ position: 'absolute', width: 0, height: 0, opacity: 0 }}
                         />
                       </label>
                       <input
@@ -276,7 +284,7 @@ export default function RightSidebar({
                     <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>Column: {fieldMappings[activeField.name]}</p>
                   )}
                   {useCsv && !activeFieldIsCsvMapped && (
-                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>Map columns in the Bulk Generation panel on the left.</p>
+                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4 }}>Map columns using the Batch CSV button in the toolbar.</p>
                   )}
                 </div>
               )}
@@ -349,21 +357,21 @@ export default function RightSidebar({
                 <div className="prop-section-content">
                   <div className="prop-row-2col">
                     <div className="prop-col">
-                      <div className="prop-col-label">Left</div>
+                      <div className="prop-col-label">Left<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeImage.x * scales.x)} onChange={(event) => updateImage(activeImage.id, { x: Number(event.target.value) / scales.x })} />
                     </div>
                     <div className="prop-col">
-                      <div className="prop-col-label">Top</div>
+                      <div className="prop-col-label">Top<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeImage.y * scales.y)} onChange={(event) => updateImage(activeImage.id, { y: Number(event.target.value) / scales.y })} />
                     </div>
                   </div>
                   <div className="prop-row-2col">
                     <div className="prop-col">
-                      <div className="prop-col-label">Width</div>
+                      <div className="prop-col-label">Width<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeImage.w * scales.x)} onChange={(event) => updateImage(activeImage.id, { w: Number(event.target.value) / scales.x })} />
                     </div>
                     <div className="prop-col">
-                      <div className="prop-col-label">Height</div>
+                      <div className="prop-col-label">Height<span className="prop-unit">pt</span></div>
                       <input className="prop-input mono" type="number" value={Math.round(activeImage.h * scales.y)} onChange={(event) => updateImage(activeImage.id, { h: Number(event.target.value) / scales.y })} />
                     </div>
                   </div>
@@ -407,8 +415,8 @@ export default function RightSidebar({
                 <path d="M9 9h6M9 13h6M9 17h4"/>
               </svg>
             </div>
-            <p>Click on a text field or image on the canvas to see its settings here.</p>
-            {!template && <p style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.15)' }}>Open a certificate template first using the File menu above.</p>}
+            <p>Click a text field or image on the canvas to edit its settings here.</p>
+            {!template && <p className="props-empty-note">Open a certificate template from File to start editing.</p>}
           </div>
         )}
       </div>
@@ -419,6 +427,7 @@ export default function RightSidebar({
           <div className="preview-panel-header">
             Latest Preview
             <div className="preview-panel-actions">
+              {downloadLatestFile && <button type="button" className="preview-open-link preview-download-link" onClick={downloadLatestFile}>Download</button>}
               <button type="button" className="preview-open-link" onClick={() => window.open(previewUrl, '_blank', 'noopener,noreferrer')}>Open ↗</button>
               <button type="button" className="preview-close-link" onClick={closePreview}>Close</button>
             </div>

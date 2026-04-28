@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { getSupabaseClient, initializeSupabaseClient } from './supabase';
 
 /**
  * Authenticated fetch wrapper.
@@ -8,9 +8,12 @@ import { supabase } from './supabase';
  * Drop-in replacement for the native `fetch` API.
  */
 export async function apiFetch(url, options = {}) {
+  // Ensure the client is fully initialized before reading the session, so
+  // we never accidentally call getSession() on the placeholder client.
+  await initializeSupabaseClient();
   const {
     data: { session },
-  } = await supabase.auth.getSession();
+  } = await getSupabaseClient().auth.getSession();
 
   const token = session?.access_token;
 

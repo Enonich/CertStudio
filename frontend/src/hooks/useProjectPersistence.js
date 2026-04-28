@@ -7,31 +7,27 @@ import {
   normalizeProjectFilename,
   setStoredProjectFileHandle,
 } from "../lib/projectFileHandle";
+import { useEditorStore } from "../store/useEditorStore";
 
 /**
  * Manages project persistence: save/load to file system and backend API.
- * Also manages the fieldsList, selectedFieldsName, saveFieldsName, and
- * projectFileHandle state.
+ * Reads editor state from the Zustand store.
  */
 export function useProjectPersistence({
   buildPayload,
   payloadToLayout,
   restoreTemplateFromLayoutState,
   loadTemplateFile,
-  template,
-  csvFile,
   fitTemplateToCanvas,
-  setFields,
-  setImageItems,
-  setActiveFieldId,
-  setActiveImageId,
-  setSampleValues,
-  setSampleHtmlValues,
-  setFieldMappings,
-  setUseCsv,
-  setGenerateOptions,
   setStatus,
+  markClean,
 }) {
+  const {
+    template, csvFile,
+    setFields, setImageItems, setActiveFieldId, setActiveImageId,
+    setSampleValues, setSampleHtmlValues,
+    setFieldMappings, setUseCsv, setGenerateOptions,
+  } = useEditorStore();
   const [projectFileHandle, setProjectFileHandle] = useState(null);
   const [fieldsList, setFieldsList] = useState([]);
   const [selectedFieldsName, setSelectedFieldsName] = useState('');
@@ -131,6 +127,7 @@ export function useProjectPersistence({
         ? `Layout "${targetName}" saved successfully (includes certificate background).`
         : `Layout "${targetName}" saved (text fields only — no background included).`
     );
+    if (markClean) markClean();
     refreshFieldsList();
   };
 
@@ -269,6 +266,7 @@ export function useProjectPersistence({
     a.remove();
     URL.revokeObjectURL(url);
     setStatus(statusMessage);
+    if (markClean) markClean();
   };
 
   const persistProjectFileHandle = async (fileHandle) => {
@@ -309,6 +307,7 @@ export function useProjectPersistence({
 
       await persistProjectFileHandle(fileHandle);
       setStatus(`Saved project to ${fileHandle.name || fallbackFilename}.`);
+      if (markClean) markClean();
       return true;
     } catch (error) {
       if (error?.name === 'AbortError') { setStatus('Save cancelled.'); return false; }

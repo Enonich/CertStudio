@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import {
   resolveFontTokenToCss,
   colorArrayToCss,
@@ -59,6 +60,7 @@ export default function CanvasArea({
   setZoom,
   handleFieldDoubleClick,
   handleWorkspaceBrowseFile,
+  openWorkspaceFile,
   applyInlineCommandOrFieldUpdate,
   handleInlineStyleClick,
   deleteSelection,
@@ -66,7 +68,11 @@ export default function CanvasArea({
   reorderSelectionLayers,
   fontPickerGroups,
   cacheSelectionRangeFromEditor,
+  requestFont,
 }) {
+  const dragDepthRef = useRef(0);
+  const [isDragActive, setIsDragActive] = useState(false);
+
   const renderFieldItem = (field) => {
     const sampleText = sampleValues[field.name] ?? `{${field.name}}`;
     const committedHtml = sampleHtmlValues[field.name];
@@ -250,8 +256,9 @@ export default function CanvasArea({
           onBlur={(event) => {
             const nextTarget = event.relatedTarget;
             const activeElement = document.activeElement;
-            const keepEditingByToolbarFocus = nextTarget instanceof HTMLElement && !!nextTarget.closest('.toolbar');
-            const keepEditingByActiveElement = activeElement instanceof HTMLElement && !!activeElement.closest('.toolbar');
+            const keepEditingSelector = '.toolbar, .floating-toolbar';
+            const keepEditingByToolbarFocus = nextTarget instanceof HTMLElement && !!nextTarget.closest(keepEditingSelector);
+            const keepEditingByActiveElement = activeElement instanceof HTMLElement && !!activeElement.closest(keepEditingSelector);
             const keepEditing = toolbarInteractionRef.current || keepEditingByToolbarFocus || keepEditingByActiveElement;
             if (keepEditing) return;
             commitFieldDraft(field.name);
@@ -317,8 +324,60 @@ export default function CanvasArea({
     );
   };
 
+  const getDraggedFile = (event) => event.dataTransfer?.files?.[0] ?? null;
+
+  const hasDraggedFiles = (event) => Array.from(event.dataTransfer?.types ?? []).includes('Files');
+
+  const supportsWorkspaceFile = (file) => {
+    if (!file) return false;
+    return /\.(pdf|png|jpe?g|json|certproj)$/i.test(file.name || '');
+  };
+
+  const resetDragState = () => {
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+  };
+
+  const handleDragEnter = (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragActive(true);
+  };
+
+  const handleDragOver = (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (!isDragActive) setIsDragActive(true);
+  };
+
+  const handleDragLeave = (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = async (event) => {
+    const file = getDraggedFile(event);
+    event.preventDefault();
+    resetDragState();
+    if (!supportsWorkspaceFile(file)) return;
+    await openWorkspaceFile(file);
+  };
+
   return (
-    <div className="canvas-area" id="canvasArea">
+    <div
+      className={`canvas-area ${isDragActive ? 'canvas-area--drag-active' : ''}`}
+      id="canvasArea"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <input
         ref={templateInputRef}
         type="file"
@@ -327,18 +386,24 @@ export default function CanvasArea({
         onChange={handleWorkspaceBrowseFile}
       />
 
+      {isDragActive && (
+        <div className="workspace-drop-overlay" aria-hidden="true">
+          <div className="workspace-drop-card">Drop a template or saved project to open it</div>
+        </div>
+      )}
+
       {/* Scrollable body — centred when small, scrollable when large */}
       <div className="canvas-scroll-body">
         {!template && (
           <div className="drop-overlay">
-            <div className="drop-zone" onClick={() => templateInputRef.current?.click()}>
+            <div className={`drop-zone ${isDragActive ? 'drop-zone--drag-active' : ''}`} onClick={() => templateInputRef.current?.click()}>
               <div className="drop-icon" aria-hidden="true">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
               </div>
               <div className="drop-title">Open a Certificate Template or Saved Project</div>
-              <div className="drop-sub">Upload a PDF or image (JPG, PNG) to use as your certificate background, or open a previously saved project to continue working.</div>
+              <div className="drop-sub">Drag in a PDF, JPG, PNG, or saved project file, or browse to start editing.</div>
               <button className="btn-browse" type="button">Browse Files</button>
-              <div className="drop-formats">PDF / PNG / JPG / Saved Project</div>
+              <div className="drop-formats">PDF / PNG / JPG / Saved Project / Drag and Drop</div>
             </div>
           </div>
         )}
@@ -351,37 +416,39 @@ export default function CanvasArea({
               height: template.displayHeight * zoom,
             }}
           >
-            <div
-              className={`template-layer ${toolMode === 'text' ? 'template-layer--text' : 'template-layer--select'}`}
-              ref={layerRef}
-              style={{
-                width: template.displayWidth,
-                height: template.displayHeight,
-                transform: `scale(${zoom})`,
-                transformOrigin: 'top left',
-              }}
-              onMouseDown={beginDraw}
-              onMouseMove={moveDraw}
-              onMouseUp={endDraw}
-            >
-              <img src={template.src} alt="Template" draggable={false} className="template-image" />
+            <div className="canvas-document-frame">
+              <div
+                className={`template-layer ${toolMode === 'text' ? 'template-layer--text' : 'template-layer--select'}`}
+                ref={layerRef}
+                style={{
+                  width: template.displayWidth,
+                  height: template.displayHeight,
+                  transform: `scale(${zoom})`,
+                  transformOrigin: 'top left',
+                }}
+                onMouseDown={beginDraw}
+                onMouseMove={moveDraw}
+                onMouseUp={endDraw}
+              >
+                <img src={template.src} alt="Template" draggable={false} className="template-image" />
 
-              {orderedCanvasItems.map((item) => (
-                item.kind === 'field' ? renderFieldItem(item) : renderImageItem(item)
-              ))}
-              {draftBox && (
-                <div
-                  className={`draft-box ${draftBox.kind === 'select' ? 'draft-box--selection' : 'draft-box--create'}`}
-                  style={{ left: draftBox.x, top: draftBox.y, width: draftBox.w, height: draftBox.h }}
-                />
-              )}
-              {alignmentGuides.map((guide, idx) => (
-                guide.type === 'vertical' ? (
-                  <div key={`guide-v-${idx}`} className="alignment-guide-vertical" style={{ position: 'absolute', left: guide.x, top: 0, width: 1, height: '100%', backgroundColor: 'rgba(79,127,255,0.7)', pointerEvents: 'none', zIndex: 1000 }} />
-                ) : (
-                  <div key={`guide-h-${idx}`} className="alignment-guide-horizontal" style={{ position: 'absolute', left: 0, top: guide.y, width: '100%', height: 1, backgroundColor: 'rgba(79,127,255,0.7)', pointerEvents: 'none', zIndex: 1000 }} />
-                )
-              ))}
+                {orderedCanvasItems.map((item) => (
+                  item.kind === 'field' ? renderFieldItem(item) : renderImageItem(item)
+                ))}
+                {draftBox && (
+                  <div
+                    className={`draft-box ${draftBox.kind === 'select' ? 'draft-box--selection' : 'draft-box--create'}`}
+                    style={{ left: draftBox.x, top: draftBox.y, width: draftBox.w, height: draftBox.h }}
+                  />
+                )}
+                {alignmentGuides.map((guide, idx) => (
+                  guide.type === 'vertical' ? (
+                    <div key={`guide-v-${idx}`} className="alignment-guide-vertical" style={{ position: 'absolute', left: guide.x, top: 0, width: 1, height: '100%', backgroundColor: 'rgba(79,127,255,0.7)', pointerEvents: 'none', zIndex: 1000 }} />
+                  ) : (
+                    <div key={`guide-h-${idx}`} className="alignment-guide-horizontal" style={{ position: 'absolute', left: 0, top: guide.y, width: '100%', height: 1, backgroundColor: 'rgba(79,127,255,0.7)', pointerEvents: 'none', zIndex: 1000 }} />
+                  )
+                ))}
+              </div>
             </div>
             {/* Floating Toolbar — outside scale layer so zoom doesn't affect its size */}
             <FloatingToolbar
@@ -390,9 +457,12 @@ export default function CanvasArea({
               fontPickerGroups={fontPickerGroups}
               updateField={updateField}
               cacheSelectionRangeFromEditor={cacheSelectionRangeFromEditor}
+              toolbarInteractionRef={toolbarInteractionRef}
               zoom={zoom}
+              canvasWidth={template.displayWidth * zoom}
               applyInlineCommandOrFieldUpdate={applyInlineCommandOrFieldUpdate}
               handleInlineStyleClick={handleInlineStyleClick}
+              requestFont={requestFont}
             />
           </div>
         )}
@@ -402,7 +472,7 @@ export default function CanvasArea({
         <button type="button" aria-label="Fit to screen" className="canvas-ctrl-btn" data-tip="Fit to screen" onClick={() => fitTemplateToCanvas(template)}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
         </button>
-        <button type="button" aria-label="Actual size (100%)" className="canvas-ctrl-btn" data-tip="Actual size" onClick={() => setZoom(1)}>1:1</button>
+        <button type="button" aria-label="Reset zoom to 100 percent" className="canvas-ctrl-btn" data-tip="Zoom to 100%" onClick={() => setZoom(1)}>100%</button>
       </div>
     </div>
   );

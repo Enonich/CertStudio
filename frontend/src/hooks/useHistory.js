@@ -1,49 +1,33 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { cloneHistoryValue } from '../lib/historyUtils';
 import { MAX_HISTORY_STEPS } from '../constants/editorConstants';
+import { useEditorStore } from '../store/useEditorStore';
 
 /**
  * Manages the undo/redo history stack for the certificate editor.
  *
- * The hook watches the provided state slices and automatically pushes an entry
- * onto the undo stack whenever they change (excluding changes that are
- * themselves caused by undo/redo playback).
- *
- * @returns {{
- *   undoStackRef: React.MutableRefObject,
- *   redoStackRef: React.MutableRefObject,
- *   isApplyingHistoryRef: React.MutableRefObject,
- *   preDragSnapshotRef: React.MutableRefObject,
- *   buildHistorySnapshot: () => object,
- *   applyHistorySnapshot: (snapshot: object) => void,
- *   performUndo: () => boolean,
- *   performRedo: () => boolean,
- * }}
+ * Reads all tracked state slices directly from the Zustand store,
+ * eliminating the need to pass state and setters as parameters.
  */
-export function useHistory({
-  fields,
-  imageItems,
-  sampleValues,
-  sampleHtmlValues,
-  fieldMappings,
-  useCsv,
-  generateOptions,
-  setFields,
-  setImageItems,
-  setSampleValues,
-  setSampleHtmlValues,
-  setFieldMappings,
-  setUseCsv,
-  setGenerateOptions,
-}) {
+export function useHistory() {
+  const {
+    fields, imageItems, sampleValues, sampleHtmlValues,
+    fieldMappings, useCsv, generateOptions,
+    activeFieldId, activeImageId,
+    setFields, setImageItems, setSampleValues, setSampleHtmlValues,
+    setFieldMappings, setUseCsv, setGenerateOptions,
+    setActiveFieldId, setActiveImageId,
+  } = useEditorStore();
   const undoStackRef = useRef([]);
   const redoStackRef = useRef([]);
   const historyCurrentRef = useRef(null);
   const historySignatureRef = useRef(null);
   const isApplyingHistoryRef = useRef(false);
   const preDragSnapshotRef = useRef(null);
+  const savedSignatureRef = useRef(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
 
   const buildHistorySnapshot = () => ({
     fields: cloneHistoryValue(fields),
@@ -53,7 +37,15 @@ export function useHistory({
     fieldMappings: cloneHistoryValue(fieldMappings),
     useCsv,
     generateOptions: cloneHistoryValue(generateOptions),
+    activeFieldId,
+    activeImageId,
   });
+
+  /** Mark the current state as the "saved" baseline for dirty tracking. */
+  const markClean = useCallback(() => {
+    savedSignatureRef.current = historySignatureRef.current;
+    setIsDirty(false);
+  }, []);
 
   const applyHistorySnapshot = (snapshot) => {
     const safeSnapshot = cloneHistoryValue(snapshot);
@@ -68,13 +60,33 @@ export function useHistory({
     setFieldMappings(safeSnapshot.fieldMappings ?? {});
     setUseCsv(Boolean(safeSnapshot.useCsv));
     setGenerateOptions((prev) => ({ ...prev, ...(safeSnapshot.generateOptions ?? {}) }));
-    // Selection state (activeFieldId, activeImageId, isEditingText) is intentionally
-    // NOT restored — undo/redo only affects document content, not UI selection.
+
+    // Restore selection so undo/redo feels natural (like Figma/Photoshop).
+    if (safeSnapshot.activeFieldId !== undefined) setActiveFieldId(safeSnapshot.activeFieldId);
+    if (safeSnapshot.activeImageId !== undefined) setActiveImageId(safeSnapshot.activeImageId);
+
+    setIsDirty(historySignatureRef.current !== savedSignatureRef.current);
 
     setTimeout(() => {
       isApplyingHistoryRef.current = false;
     }, 0);
   };
+
+  /**
+   * Explicitly push the current document state onto the undo stack.
+   * Call this BEFORE a destructive operation (e.g. template replacement,
+   * bulk deletion) so the user can undo back to the pre-destruction state.
+   */
+  const pushSnapshot = useCallback(() => {
+    const snapshot = buildHistorySnapshot();
+    undoStackRef.current.push(snapshot);
+    if (undoStackRef.current.length > MAX_HISTORY_STEPS) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    setCanUndo(true);
+    setCanRedo(false);
+    historyCurrentRef.current = snapshot;
+    historySignatureRef.current = JSON.stringify(snapshot);
+  }, [fields, imageItems, sampleValues, sampleHtmlValues, fieldMappings, useCsv, generateOptions, activeFieldId, activeImageId]);
 
   const performUndo = () => {
     if (undoStackRef.current.length === 0) {
@@ -143,6 +155,7 @@ export function useHistory({
     setCanRedo(false);
     historyCurrentRef.current = snapshot;
     historySignatureRef.current = signature;
+    setIsDirty(signature !== savedSignatureRef.current);
   }, [
     fields,
     imageItems,
@@ -151,8 +164,8 @@ export function useHistory({
     fieldMappings,
     useCsv,
     generateOptions,
-    // activeFieldId, activeImageId, isEditingText are excluded: selection changes
-    // are not undoable document operations.
+    activeFieldId,
+    activeImageId,
   ]);
 
   return {
@@ -162,9 +175,12 @@ export function useHistory({
     preDragSnapshotRef,
     buildHistorySnapshot,
     applyHistorySnapshot,
+    pushSnapshot,
     performUndo,
     performRedo,
     canUndo,
     canRedo,
+    isDirty,
+    markClean,
   };
 }

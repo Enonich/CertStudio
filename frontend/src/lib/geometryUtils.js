@@ -17,6 +17,18 @@ export function fitSizeForPreview(text, boxWidthPx, fontSizePx) {
   return Math.max(8, (boxWidthPx / widthEstimate) * fontSizePx);
 }
 
+/**
+ * Strip characters that could break CSV mapping, JSON keys, or downstream templates.
+ * Allows letters, digits, spaces, hyphens, underscores, and periods.
+ */
+export function sanitizeFieldName(raw) {
+  return String(raw ?? '')
+    .trim()
+    .replace(/[^\w\s.\-]/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+}
+
 export function uniqueFieldName(baseName, fields, excludeId = null) {
   const normalized = String(baseName ?? '').trim() || 'field';
   const existing = new Set(

@@ -1,11 +1,13 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { resolveFontTokenToCss } from '../lib/fontUtils';
+import { colorArrayToHex, hexToColorArray } from '../lib/colorUtils';
 import { COMMON_FONT_SIZES } from '../constants/editorConstants';
 
 /* ─── Custom Font Picker ─────────────────────────────────── */
-function FontPickerDropdown({ value, fontPickerGroups, onSelect }) {
+function FontPickerDropdown({ value, fontPickerGroups, onSelect, requestFont }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [requesting, setRequesting] = useState(false);
   const rootRef = useRef(null);
   const searchRef = useRef(null);
 
@@ -112,6 +114,34 @@ function FontPickerDropdown({ value, fontPickerGroups, onSelect }) {
               );
             })}
           </div>
+
+          {/* Request a font */}
+          {requestFont && (
+            <form
+              className="font-picker-float-request"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const name = query.trim();
+                if (!name || requesting) return;
+                setRequesting(true);
+                await requestFont(name);
+                setQuery('');
+                setRequesting(false);
+              }}
+            >
+              <span className="font-picker-float-request-hint">
+                Don't see yours?
+              </span>
+              <button
+                type="submit"
+                className="font-picker-float-request-btn"
+                disabled={!query.trim() || requesting}
+                title={query.trim() ? `Request "${query.trim()}"` : 'Type a font name above to request it'}
+              >
+                {requesting ? 'Sending…' : `Request${query.trim() ? ` "${query.trim()}"` : ''}`}
+              </button>
+            </form>
+          )}
         </div>
       )}
     </div>
@@ -227,14 +257,35 @@ export default function FloatingToolbar({
   fontPickerGroups,
   updateField,
   cacheSelectionRangeFromEditor,
+  toolbarInteractionRef,
   applyInlineCommandOrFieldUpdate,
   handleInlineStyleClick,
   zoom,
+  canvasWidth,
+  requestFont,
 }) {
   const [fmtState, setFmtState] = useState({
     bold: false, italic: false, underline: false,
     strikeThrough: false, insertUnorderedList: false,
   });
+  const toolbarRef = useRef(null);
+  const interactionTimeoutRef = useRef(null);
+  const [toolbarSize, setToolbarSize] = useState({ width: 0, height: 36 });
+
+  const markToolbarInteraction = () => {
+    if (!toolbarInteractionRef) return;
+
+    toolbarInteractionRef.current = true;
+
+    if (interactionTimeoutRef.current) {
+      window.clearTimeout(interactionTimeoutRef.current);
+    }
+
+    interactionTimeoutRef.current = window.setTimeout(() => {
+      toolbarInteractionRef.current = false;
+      interactionTimeoutRef.current = null;
+    }, 180);
+  };
 
   useEffect(() => {
     if (!isEditingText) return;
@@ -258,36 +309,76 @@ export default function FloatingToolbar({
     };
   }, [isEditingText]);
 
+  useLayoutEffect(() => {
+    if (!isEditingText || !activeField || !toolbarRef.current) return undefined;
+
+    const node = toolbarRef.current;
+    const updateSize = () => {
+      setToolbarSize({
+        width: node.offsetWidth || 0,
+        height: node.offsetHeight || 36,
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
+    }
+
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [activeField, canvasWidth, isEditingText]);
+
+  useEffect(() => () => {
+    if (interactionTimeoutRef.current) {
+      window.clearTimeout(interactionTimeoutRef.current);
+    }
+    if (toolbarInteractionRef) {
+      toolbarInteractionRef.current = false;
+    }
+  }, [toolbarInteractionRef]);
+
   if (!isEditingText || !activeField) return null;
 
-  const TOOLBAR_HEIGHT = 36;
-  const topStr  = `${activeField.y * zoom - TOOLBAR_HEIGHT - 6}px`;
-  const leftStr = `${activeField.x * zoom}px`;
-  const align   = activeField.align || 'left';
+  const TOOLBAR_MARGIN = 8;
+  const maxToolbarWidth = canvasWidth ? Math.max(220, canvasWidth - (TOOLBAR_MARGIN * 2)) : undefined;
+  const preferredLeft = activeField.x * zoom;
+  const preferredTop = activeField.y * zoom - toolbarSize.height - 10;
+  const maxLeft = canvasWidth
+    ? Math.max(TOOLBAR_MARGIN, canvasWidth - toolbarSize.width - TOOLBAR_MARGIN)
+    : preferredLeft;
+  const leftPos = canvasWidth
+    ? Math.min(Math.max(preferredLeft, TOOLBAR_MARGIN), maxLeft)
+    : preferredLeft;
+  const topPos = Math.max(TOOLBAR_MARGIN, preferredTop);
+  const align = activeField.align || 'left';
+  const isCompact = Boolean(maxToolbarWidth) && toolbarSize.width >= maxToolbarWidth;
 
   return (
     <div
-      className="floating-toolbar toolbar"
+      ref={toolbarRef}
+      className={`floating-toolbar ${isCompact ? 'floating-toolbar--compact' : ''}`}
       style={{
         position: 'absolute',
-        top: topStr, left: leftStr,
+        top: `${topPos}px`,
+        left: `${leftPos}px`,
+        maxWidth: maxToolbarWidth ? `${maxToolbarWidth}px` : undefined,
         zIndex: 1000,
-        display: 'flex', alignItems: 'center', flexWrap: 'nowrap',
-        background: '#23252E',
-        border: '1px solid rgba(255,255,255,0.13)',
-        borderRadius: '16px',
-        padding: '4px 7px',
-        gap: '1px',
-        boxShadow: '0 12px 40px rgba(0,0,0,0.65)',
-        animation: 'floatingToolbarFadeIn 0.15s ease',
       }}
-      onMouseDownCapture={() => cacheSelectionRangeFromEditor?.()}
+      onMouseDownCapture={() => {
+        cacheSelectionRangeFromEditor?.();
+        markToolbarInteraction();
+      }}
       onMouseDown={(e) => e.stopPropagation()}
     >
       {/* ── Font Family custom picker ── */}
       <FontPickerDropdown
         value={activeField.font || 'Helvetica'}
         fontPickerGroups={fontPickerGroups}
+        requestFont={requestFont}
         onSelect={(nextFont) =>
           applyInlineCommandOrFieldUpdate({
             command: 'fontName', value: nextFont,
@@ -331,6 +422,28 @@ export default function FloatingToolbar({
         onClick={() => applyInlineCommandOrFieldUpdate({ command: 'strikeThrough', fieldPatch: {} })} title="Strikethrough">
         <span style={{ fontSize: '11px', textDecoration: 'line-through', fontFamily: 'Georgia, serif' }}>S</span>
       </button>
+
+      {/* ── Color ── */}
+      <label
+        className="tool-btn-float"
+        title="Text color"
+        style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, position: 'relative' }}
+      >
+        <span style={{ fontSize: '11px', fontFamily: 'Georgia, serif', lineHeight: 1, fontWeight: 'bold' }}>A</span>
+        <span style={{ width: 11, height: 2, borderRadius: 1, background: colorArrayToHex(activeField.color) }} />
+        <input
+          type="color"
+          value={colorArrayToHex(activeField.color)}
+          style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer', width: '100%', height: '100%', border: 'none', padding: 0 }}
+          onChange={(e) => applyInlineCommandOrFieldUpdate({
+            command: 'foreColor',
+            value: e.target.value,
+            fieldPatch: { color: hexToColorArray(e.target.value) },
+            requireSelection: true,
+            selectionMessage: 'Select text to apply color.',
+          })}
+        />
+      </label>
 
       <Sep />
 

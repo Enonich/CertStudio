@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useModalA11y } from './modals/modalUtils';
 
 function CertPreviewModal({
   isOpen,
@@ -9,7 +10,8 @@ function CertPreviewModal({
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedCerts, setSelectedCerts] = useState(new Set());
   const [deletedCerts, setDeletedCerts] = useState(new Set());
-  const modalRef = useRef(null);
+  const closeButtonRef = useRef(null);
+  const modalRef = useModalA11y({ isOpen, onClose, initialFocusRef: closeButtonRef });
 
   useEffect(() => {
     if (certificates && certificates.length > 0) {
@@ -43,21 +45,11 @@ function CertPreviewModal({
       } else if (event.key === 'ArrowRight') {
         event.preventDefault();
         setCurrentIndex((prev) => (prev === certificates.length - 1 ? 0 : prev + 1));
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        onClose();
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [isOpen, certificates, onClose]);
-
-  // Focus the modal when it opens so keyboard navigation starts inside the dialog
-  useEffect(() => {
-    if (isOpen) {
-      modalRef.current?.focus();
-    }
-  }, [isOpen]);
+  }, [isOpen, certificates]);
 
   if (!isOpen || !certificates || certificates.length === 0) {
     return null;
@@ -157,17 +149,19 @@ function CertPreviewModal({
               <polyline points="9 16 12 13 15 16" />
             </svg>
             <span>
-              Preview Certificates
-              <span className="cert-preview-count">
-                {certificates.length} total
-                {deletedCount > 0 && `, ${deletedCount} marked for deletion`}
-                {selectedCount > 0 && `, ${selectedCount} selected`}
+              <span className="cert-preview-eyebrow">Batch Preview</span>
+              <span className="cert-preview-title-text">Preview Certificates</span>
+              <span className="cert-preview-meta">
+                <span className="cert-preview-pill">{certificates.length} total</span>
+                <span className="cert-preview-pill cert-preview-pill--selected">{selectedCount} selected</span>
+                {deletedCount > 0 && <span className="cert-preview-pill cert-preview-pill--danger">{deletedCount} removed</span>}
               </span>
             </span>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
-            className="cert-preview-close-btn"
+            className="cert-preview-close-btn editor-modal-close"
             onClick={onClose}
             aria-label="Close preview"
           >

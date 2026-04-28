@@ -1,39 +1,20 @@
+import { useEditorStore } from '../store/useEditorStore';
+
 export default function TopBar({
-  // State
-  insertMenuOpen,
-  layoutsMenuOpen,
-  settingsMenuOpen,
-  generateMenuOpen,
-  printMenuOpen,
-  template,
-  fields,
-  imageItems,
-  csvFile,
-  csvRowCount,
-  generateOptions,
-  updatePreviewRow,
-  canPrintFromCsv,
-  useCsv,
+  // Derived / non-store values
   previewUrl,
   latestDownload,
-  isGenerating,
   isPreviewingAll,
-  isGenerateActionDisabled,
-  generateDisabledTooltip,
   projectFileHandle,
   selectedFieldsName,
   saveFieldsName,
   fieldsList,
   session,
-  // Setters
-  setInsertMenuOpen,
-  setLayoutsMenuOpen,
-  setSettingsMenuOpen,
-  setGenerateMenuOpen,
-  setPrintMenuOpen,
+  canUndo,
+  canRedo,
+  // Setters for non-store state
   setSelectedFieldsName,
   setSaveFieldsName,
-  setGenerateOptions,
   // Handlers
   handleTemplatePickerChange,
   loadFromFile,
@@ -45,8 +26,6 @@ export default function TopBar({
   refreshFieldsList,
   importImageElement,
   closePreview,
-  canUndo,
-  canRedo,
   performUndo,
   performRedo,
   generatePdf,
@@ -54,9 +33,23 @@ export default function TopBar({
   previewAllCertificates,
   downloadLatestFile,
   signOut,
-  bulkDrawerOpen,
-  setBulkDrawerOpen,
+  updatePreviewRow,
+  canPrintFromCsv,
 }) {
+  const {
+    insertMenuOpen, setInsertMenuOpen,
+    layoutsMenuOpen, setLayoutsMenuOpen,
+    settingsMenuOpen, setSettingsMenuOpen,
+    generateMenuOpen, setGenerateMenuOpen,
+    printMenuOpen, setPrintMenuOpen,
+    template, fields, imageItems,
+    csvFile, csvRowCount, generateOptions, setGenerateOptions,
+    useCsv, isGenerating,
+    bulkDrawerOpen, setBulkDrawerOpen,
+  } = useEditorStore();
+
+  const isGenerateActionDisabled = !template || fields.length === 0;
+  const generateDisabledTooltip = 'Open a certificate template before generating';
   const handleFileLabelKeyDown = (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -221,7 +214,7 @@ export default function TopBar({
                       onChange={(event) => {
                         const raw = Number(event.target.value) || 1;
                         const clamped = Math.min(Math.max(raw, 1), csvRowCount);
-                        setGenerateOptions((prev) => ({ ...prev, row: clamped - 1 }));
+                        updatePreviewRow(clamped - 1);
                       }}
                     />
                   </div>
@@ -286,46 +279,15 @@ export default function TopBar({
           onClick={() => { setBulkDrawerOpen(!bulkDrawerOpen); setInsertMenuOpen(false); setLayoutsMenuOpen(false); setSettingsMenuOpen(false); setGenerateMenuOpen(false); setPrintMenuOpen(false); }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>
-          Batch CSV
+          Bulk Generate
           {useCsv && csvRowCount > 0 && <span className="bulk-menu-btn-indicator">{csvRowCount}</span>}
         </button>
       </div>
-      {useCsv && csvRowCount > 0 && (
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(255,255,255,0.04)', padding: '4px 12px', borderRadius: '20px' }}>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>Preview Row:</span>
-            <button
-              style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '0 4px', opacity: generateOptions.row > 0 ? 1 : 0.3 }}
-              disabled={generateOptions.row <= 0}
-              onClick={() => updatePreviewRow(generateOptions.row - 1)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-            </button>
-            <input
-              type="range"
-              min="0"
-              max={Math.max(0, csvRowCount - 1)}
-              value={generateOptions.row}
-              onChange={(e) => updatePreviewRow(parseInt(e.target.value))}
-              style={{ width: '100px', cursor: 'pointer' }}
-            />
-            <span style={{ fontSize: 11, color: '#fff', minWidth: '45px' }}>{generateOptions.row + 1} / {csvRowCount}</span>
-            <button
-              style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '0 4px', opacity: generateOptions.row < csvRowCount - 1 ? 1 : 0.3 }}
-              disabled={generateOptions.row >= csvRowCount - 1}
-              onClick={() => updatePreviewRow(generateOptions.row + 1)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </button>
-          </div>
-        </div>
-      )}
-      {!useCsv && <div className="topbar-spacer" style={{ flex: 1 }} />}
       <div className="topbar-spacer" />
 
       <div className="template-status" title={template?.name ?? ''}>
         <div className="template-dot" />
-        {template?.name ?? 'No certificate template'}
+        {template?.name?.replace(/\.[^.]+$/, '') ?? 'No certificate template'}
       </div>
 
       <div className="topbar-actions">
@@ -349,7 +311,7 @@ export default function TopBar({
         <div className="topbar-generate" title={isGenerateActionDisabled ? generateDisabledTooltip : ''}>
           <div className="generate-btn-group">
             <button type="button" className="btn-generate" disabled={isGenerateActionDisabled || isGenerating} onClick={generatePdf}>
-              {isGenerating ? (<><span className="generate-spinner" />Generating…</>) : (<><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>Generate PDF</>)}
+              {isGenerating ? (<><span className="generate-spinner" />Generating…</>) : useCsv && csvFile && generateOptions.generate_all ? (<><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>Generate All ({csvRowCount})</>) : (<><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>Generate PDF</>)}
             </button>
             <button type="button" className="btn-generate-arrow" disabled={isGenerateActionDisabled} onClick={() => { setGenerateMenuOpen(!generateMenuOpen); setInsertMenuOpen(false); setLayoutsMenuOpen(false); setSettingsMenuOpen(false); setPrintMenuOpen(false); }}>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
@@ -367,7 +329,7 @@ export default function TopBar({
                   </select>
                 </div>
                 <div className="nav-form-row">
-                  <label className="nav-form-label">Page size</label>
+                  <label className="nav-form-label">Export size</label>
                   <select className="nav-dropdown-select" value={generateOptions.page_size} onChange={(event) => setGenerateOptions((prev) => ({ ...prev, page_size: event.target.value }))}>
                     <option value="letter">Letter (8.5 x 11 in)</option>
                     <option value="a4">A4 (210 x 297 mm)</option>
@@ -408,7 +370,7 @@ export default function TopBar({
                             onChange={(event) => {
                               const raw = Number(event.target.value) || 1;
                               const clamped = Math.min(Math.max(raw, 1), csvRowCount);
-                              setGenerateOptions((prev) => ({ ...prev, row: clamped - 1 }));
+                              updatePreviewRow(clamped - 1);
                             }}
                           />
                         </div>
@@ -439,20 +401,20 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* SIGN OUT */}
-      <div style={{ marginLeft: '8px' }}>
-        <button
-          type="button"
-          className="btn-icon"
-          aria-label={`Sign out (${session?.user?.email ?? ''})`}
-          data-tip={`Sign out (${session?.user?.email ?? ''})`}
-          onClick={signOut}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
-          </svg>
-        </button>
-      </div>
+      {/* USER AVATAR / SIGN OUT */}
+      <div className="topbar-divider" />
+      <button
+        type="button"
+        className="topbar-avatar-btn"
+        aria-label={`Sign out (${session?.user?.email ?? ''})`}
+        title={session?.user?.email ?? 'Account'}
+        onClick={signOut}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+      </button>
     </div>
   );
 }

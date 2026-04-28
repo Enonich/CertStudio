@@ -1,62 +1,72 @@
-import { useState } from "react";
 import { apiFetch } from "../lib/apiFetch";
 import { dataUrlToFile, readFileAsDataUrl } from "../lib/fileUtils";
 import { loadTemplate } from "../lib/templateLoader";
+import { useEditorStore } from "../store/useEditorStore";
 
 /**
  * Manages template file state: loading, replacing, and restoring from saved layouts.
+ * Reads editor state from the Zustand store; only non-store dependencies are passed as params.
  */
 export function useTemplateLoader({
   pageSize,
-  fields,
-  imageItems,
-  setFields,
-  setImageItems,
-  setActiveFieldId,
-  setActiveImageId,
-  setSampleValues,
-  setSampleHtmlValues,
   setStatus,
-  setInsertMenuOpen,
   fitTemplateToCanvas,
+  pushSnapshot,
 }) {
-  const [template, setTemplate] = useState(null);
-  const [templateFile, setTemplateFile] = useState(null);
-  const [templateFileDataUrl, setTemplateFileDataUrl] = useState('');
-  const [replaceTemplateModal, setReplaceTemplateModal] = useState({ open: false, file: null });
+  const {
+    fields, imageItems,
+    setFields, setImageItems, setActiveFieldId, setActiveImageId,
+    setSampleValues, setSampleHtmlValues,
+    setInsertMenuOpen,
+    template, setTemplate,
+    templateFile, setTemplateFile,
+    templateFileDataUrl, setTemplateFileDataUrl,
+    replaceTemplateModal, setReplaceTemplateModal,
+    isLoadingTemplate, setIsLoadingTemplate,
+  } = useEditorStore();
 
   const loadTemplateFile = async (file) => {
-    const loaded = await loadTemplate(file, pageSize);
-    const fileDataUrl = await readFileAsDataUrl(file);
-    setTemplate(loaded);
-    setTemplateFile(file);
-    setTemplateFileDataUrl(fileDataUrl);
-    setFields([]);
-    setImageItems([]);
-    setActiveFieldId(null);
-    setActiveImageId(null);
-    setSampleValues({});
-    setSampleHtmlValues({});
-    setStatus(`Template loaded: ${loaded.name}`);
-    fitTemplateToCanvas(loaded);
+    // Snapshot before clearing so the user can Undo back to the previous state.
+    if (fields.length > 0 || imageItems.length > 0) {
+      pushSnapshot();
+    }
+    setIsLoadingTemplate(true);
+    try {
+      const loaded = await loadTemplate(file, pageSize);
+      const fileDataUrl = await readFileAsDataUrl(file);
+      setTemplate(loaded);
+      setTemplateFile(file);
+      setTemplateFileDataUrl(fileDataUrl);
+      setFields([]);
+      setImageItems([]);
+      setActiveFieldId(null);
+      setActiveImageId(null);
+      setSampleValues({});
+      setSampleHtmlValues({});
+      setStatus(`Template loaded: ${loaded.name}`);
+      fitTemplateToCanvas(loaded);
 
-    if (file.name.toLowerCase().endsWith('.pdf')) {
-      try {
-        const formData = new FormData();
-        formData.append('template', file);
-        const response = await apiFetch('/api/extract-fonts', {
-          method: 'POST',
-          body: formData,
-        });
-        if (response.ok) {
-          const data = await response.json();
-          setStatus(
-            `Template loaded: ${loaded.name} (${data.fonts?.length || 0} embedded font${data.fonts?.length === 1 ? '' : 's'} detected)`
-          );
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        try {
+          const formData = new FormData();
+          formData.append('template', file);
+          const response = await apiFetch('/api/extract-fonts', {
+            method: 'POST',
+            body: formData,
+          });
+          if (response.ok) {
+            const data = await response.json();
+            setStatus(
+              `Template loaded: ${loaded.name} (${data.fonts?.length || 0} embedded font${data.fonts?.length === 1 ? '' : 's'} detected)`
+            );
+          }
+        } catch (error) {
+          // Font extraction is best-effort; notify user instead of swallowing.
+          setStatus(`Template loaded: ${loaded.name} (font detection failed — embedded fonts may not appear in the picker)`);
         }
-      } catch (error) {
-        console.error('Failed to extract fonts:', error);
       }
+    } finally {
+      setIsLoadingTemplate(false);
     }
   };
 
@@ -113,14 +123,6 @@ export function useTemplateLoader({
   };
 
   return {
-    template,
-    setTemplate,
-    templateFile,
-    setTemplateFile,
-    templateFileDataUrl,
-    setTemplateFileDataUrl,
-    replaceTemplateModal,
-    setReplaceTemplateModal,
     loadTemplateFile,
     handleTemplatePickerChange,
     cancelTemplateReplace,

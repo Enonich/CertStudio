@@ -1,27 +1,24 @@
 import { plainTextToHtml, sanitizeHtml } from "../lib/htmlUtils";
 import { clampBox } from "../lib/geometryUtils";
 import { uid } from "../lib/historyUtils";
+import { useEditorStore } from "../store/useEditorStore";
 
 /**
  * Provides payload construction utilities for communicating with the backend.
- * Pure logic — no state, no effects.
+ * Reads editor state from the Zustand store.
  */
 export function usePayload({
-  template,
   scales,
-  fields,
-  imageItems,
-  sampleValues,
-  sampleHtmlValues,
-  fieldMappings,
-  useCsv,
-  generateOptions,
-  templateFile,
-  templateFileDataUrl,
-  isEditingText,
   editingDraftRef,
   availableFontValues,
 }) {
+  const {
+    template, fields, imageItems,
+    sampleValues, sampleHtmlValues,
+    fieldMappings, useCsv, generateOptions,
+    templateFile, templateFileDataUrl,
+    isEditingText,
+  } = useEditorStore();
   const getFieldValuePayload = (fieldName) => {
     if (isEditingText && editingDraftRef.current.name === fieldName) {
       const draftText = editingDraftRef.current.text ?? '';

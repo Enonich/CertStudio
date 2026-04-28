@@ -2,34 +2,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createRangeFromOffset, getCaretOffset } from "../lib/caretUtils";
 import { resolveFontTokenToCss } from "../lib/fontUtils";
 import { normalizeEditorHtml, plainTextToHtml, sanitizeHtml, stripInlineFontFamily } from "../lib/htmlUtils";
+import { useEditorStore } from "../store/useEditorStore";
 
 /**
  * Manages all rich-text editing state and operations: font/size/color pickers,
  * inline formatting, font-hover preview, draft commits, and selection caching.
+ * Reads editor + picker state from the Zustand store.
  */
 export function useFieldEditor({
-  activeField,
-  activeFieldId,
-  isEditingText,
-  setIsEditingText,
   editingDraftRef,
   lastSelectionRangeRef,
   fontHoverPreviewRef,
-  sampleValues,
-  sampleHtmlValues,
-  setSampleValues,
-  setSampleHtmlValues,
   availableFontValues,
   updateField,
   setStatus,
 }) {
-  const [fontPickerOpen, setFontPickerOpen] = useState(false);
-  const [fontHoverFamily, setFontHoverFamily] = useState('');
-  const [sizePickerOpen, setSizePickerOpen] = useState(false);
-  const [sizeHoverValue, setSizeHoverValue] = useState(null);
-  const [colorPickerOpen, setColorPickerOpen] = useState(false);
-  const [colorHoverValue, setColorHoverValue] = useState('');
-  const [activeEditorFont, setActiveEditorFont] = useState('');
+  const {
+    activeFieldId, isEditingText, setIsEditingText,
+    sampleValues, sampleHtmlValues, setSampleValues, setSampleHtmlValues,
+    fontPickerOpen, setFontPickerOpen,
+    fontHoverFamily, setFontHoverFamily,
+    sizePickerOpen, setSizePickerOpen,
+    sizeHoverValue, setSizeHoverValue,
+    colorPickerOpen, setColorPickerOpen,
+    colorHoverValue, setColorHoverValue,
+    activeEditorFont, setActiveEditorFont,
+    fields,
+  } = useEditorStore();
+  const activeField = fields.find((f) => f.id === activeFieldId) ?? null;
 
   // ---- Effects ---------------------------------------------------------------
 
@@ -492,14 +492,6 @@ export function useFieldEditor({
   }, [isEditingText, activeFieldId, availableFontValues]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
-    // Picker state
-    fontPickerOpen, setFontPickerOpen,
-    fontHoverFamily, setFontHoverFamily,
-    sizePickerOpen, setSizePickerOpen,
-    sizeHoverValue, setSizeHoverValue,
-    colorPickerOpen, setColorPickerOpen,
-    colorHoverValue, setColorHoverValue,
-    activeEditorFont, setActiveEditorFont,
     // DOM helpers
     getActiveEditorEl,
     selectionInsideEditor,

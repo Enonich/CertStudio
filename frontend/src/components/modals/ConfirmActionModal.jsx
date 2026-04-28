@@ -1,46 +1,54 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+import ModalFrame from './ModalFrame';
 
-const FOCUSABLE = 'button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
-export default function ConfirmActionModal({ title, message, confirmLabel, onConfirm, onCancel }) {
-  const modalRef = useRef(null);
+export default function ConfirmActionModal({
+  title,
+  message,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  confirmTone = 'danger',
+  eyebrow = 'Template',
+  tone = 'warning',
+  callout,
+  headerIcon: customHeaderIcon,
+}) {
   const confirmBtnRef = useRef(null);
 
-  useEffect(() => {
-    confirmBtnRef.current?.focus();
-  }, []);
+  const footer = (
+    <>
+      <button type="button" className="editor-modal-btn editor-modal-btn--ghost" onClick={onCancel}>Cancel</button>
+      <button ref={confirmBtnRef} type="button" className={`editor-modal-btn editor-modal-btn--${confirmTone}`} onClick={onConfirm}>{confirmLabel}</button>
+    </>
+  );
 
-  useEffect(() => {
-    const handleKeyDown = (event) => {
-      if (event.key === 'Escape') onCancel();
-      if (event.key === 'Tab') {
-        const nodes = Array.from(modalRef.current?.querySelectorAll(FOCUSABLE) ?? []);
-        if (!nodes.length) return;
-        const first = nodes[0];
-        const last = nodes[nodes.length - 1];
-        if (event.shiftKey) {
-          if (document.activeElement === first) { event.preventDefault(); last.focus(); }
-        } else {
-          if (document.activeElement === last) { event.preventDefault(); first.focus(); }
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onCancel]);
+  const defaultCallout = (
+    <div className="editor-modal-callout editor-modal-callout--warning">
+      <div className="editor-modal-callout-title">Current fields and images will be removed.</div>
+      <p className="editor-modal-callout-copy">Save the project first if you may want to return to this layout later.</p>
+    </div>
+  );
+
+  const defaultHeaderIcon = (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+    </svg>
+  );
 
   return (
-    <div className="zip-modal-backdrop" onClick={onCancel}>
-      <div className="zip-modal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="confirm-action-title" onClick={(e) => e.stopPropagation()}>
-        <div className="zip-modal-header" id="confirm-action-title">{title}</div>
-        <div className="zip-modal-body">
-          <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)', lineHeight: 1.6 }}>{message}</p>
-        </div>
-        <div className="zip-modal-footer">
-          <button type="button" className="zip-modal-btn zip-modal-btn--cancel" onClick={onCancel}>Cancel</button>
-          <button ref={confirmBtnRef} type="button" className="zip-modal-btn zip-modal-btn--confirm" onClick={onConfirm}>{confirmLabel}</button>
-        </div>
-      </div>
-    </div>
+    <ModalFrame
+      eyebrow={eyebrow}
+      title={title}
+      subtitle={message}
+      onClose={onCancel}
+      initialFocusRef={confirmBtnRef}
+      tone={tone}
+      footer={footer}
+      headerIcon={customHeaderIcon ?? defaultHeaderIcon}
+    >
+      {callout !== null ? (callout ?? defaultCallout) : null}
+    </ModalFrame>
   );
 }

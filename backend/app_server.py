@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,6 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from reportlab.pdfbase.ttfonts import TTFont
 
 try:
     from .auth import AuthenticatedUser, bearer_scheme, get_authenticated_user
@@ -130,23 +130,6 @@ async def enforce_request_size_limit(request: Request, call_next):
                 content={"message": f"Request body too large. Limit is {MAX_REQUEST_BODY_BYTES} bytes."},
             )
     return await call_next(request)
-
-
-class GenerateRequest(BaseModel):
-    output: str = "out/generated_overlay.pdf"
-    fields: str = "fields.json"
-    template: str | None = None
-    csv_path: str | None = None
-    data: dict[str, Any] | None = None
-    row: int = 0
-    placeholder_mode: bool = False
-    dx: float = 0.0
-    dy: float = 0.0
-    debug: bool = False
-    grid_step: float = 0.0
-    font_path: str | None = None
-    overlay_only: bool = True
-    page_size: str = "letter"
 
 
 @app.get("/api/health")
@@ -417,97 +400,6 @@ def save_fields(
     return {"message": f"Saved: {display_name}"}
 
 
-@app.post("/api/generate")
-def generate_overlay(
-    request: GenerateRequest,
-    user: AuthenticatedUser = Depends(require_authenticated_user),
-) -> dict[str, Any]:
-    return run_overlay_generation(request, user)
-
-
-def run_overlay_generation(request: GenerateRequest, user: AuthenticatedUser) -> dict[str, Any]:
-    temp_data_path: Path | None = None
-    fields_path, fields_name = resolve_fields_path(request.fields, user.sub)
-    if not fields_path.exists():
-        raise HTTPException(status_code=404, detail=f"Fields file not found: {fields_name}")
-
-    output_path = resolve_output_path(request.output)
-    output_rel_path = str(output_path.relative_to(ROOT_DIR))
-
-    cmd = [
-        sys.executable,
-        str(CERT_OVERLAY_SCRIPT),
-        "--fields",
-        str(fields_path),
-        "--output",
-        output_rel_path,
-        "--row",
-        str(request.row),
-        "--dx",
-        str(request.dx),
-        "--dy",
-        str(request.dy),
-        "--grid-step",
-        str(request.grid_step),
-        "--page-size",
-        request.page_size,
-    ]
-
-    if request.template:
-        resolved_template = _resolve_within(request.template, ALLOWED_TEMPLATE_DIR, "template")
-        cmd.extend(["--template", str(resolved_template)])
-    if request.csv_path:
-        resolved_csv = _resolve_within(request.csv_path, ALLOWED_DATA_DIR, "csv_path")
-        cmd.extend(["--csv", str(resolved_csv)])
-    if request.data:
-        temp_data_path = write_json_payload_to_temp(request.data)
-        cmd.extend(["--data-json", str(temp_data_path)])
-    if request.placeholder_mode:
-        cmd.append("--placeholder-mode")
-    if request.debug:
-        cmd.append("--debug")
-    if request.font_path:
-        resolved_font = _resolve_within(request.font_path, ALLOWED_FONTS_DIR, "font_path")
-        cmd.extend(["--font-path", str(resolved_font)])
-    if request.overlay_only:
-        cmd.append("--overlay-only")
-    try:
-        result = run_overlay_subprocess(cmd)
-    finally:
-        safe_unlink(temp_data_path)
-    if result.returncode != 0:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "Overlay generation failed.",
-                "command": cmd,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            },
-        )
-
-    return {
-        "message": "Overlay generated.",
-        "output": output_rel_path,
-        "stdout": result.stdout,
-    }
-
-
-@app.post("/api/generate-file")
-def generate_overlay_file(
-    request: GenerateRequest,
-    user: AuthenticatedUser = Depends(require_authenticated_user),
-) -> FileResponse:
-    result = run_overlay_generation(request, user)
-    output_path = resolve_output_path(result["output"])
-    if not output_path.exists():
-        raise HTTPException(status_code=500, detail="Generated file not found.")
-    return FileResponse(
-        output_path,
-        media_type="application/pdf",
-    )
-
-
 @app.post("/api/generate-file-upload")
 def generate_overlay_file_upload(
     background_tasks: BackgroundTasks,
@@ -540,6 +432,19 @@ def generate_overlay_file_upload(
                 max_bytes=MAX_UPLOAD_FILE_BYTES,
             )
             temp_files.append(template_path)
+            template_suffix = Path(template.filename or "").suffix.lower()
+            if template_suffix not in {".pdf"}:
+                if not overlay_only:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Non-PDF templates are only supported in overlay-only mode. "
+                            "Please use a PDF template for full certificate merging."
+                        ),
+                    )
+                # For overlay_only mode, page dimensions come from --page-size.
+                # Don't forward a non-PDF file as --template to the subprocess.
+                template_path = None
         elif not overlay_only:
             raise HTTPException(status_code=400, detail="Template file is required unless overlay_only is true.")
 
@@ -813,34 +718,53 @@ def extract_fonts(
         template.file.close()
 
 
+FONT_REQUESTS_FILE = ROOT_DIR / "config" / "font_requests.json"
+_font_requests_lock = threading.Lock()
+
+
+def _load_font_requests() -> list[dict[str, Any]]:
+    if not FONT_REQUESTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(FONT_REQUESTS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_font_requests(requests: list[dict[str, Any]]) -> None:
+    FONT_REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FONT_REQUESTS_FILE.write_text(json.dumps(requests, indent=2), encoding="utf-8")
+
+
 @app.get("/api/list-custom-fonts")
 def list_custom_fonts(_user: AuthenticatedUser = Depends(require_authenticated_user)) -> dict[str, Any]:
-    """List all custom TrueType fonts available in the fonts directory."""
+    """List all platform TrueType fonts available in the fonts directory."""
     fonts_dir = ROOT_DIR / "assets" / "fonts"
-    
+
     available_fonts = []
     if fonts_dir.exists():
-        for font_file in fonts_dir.glob("*.ttf"):
-            file_size = font_file.stat().st_size
+        for font_file in sorted(fonts_dir.glob("*.ttf")):
             available_fonts.append({
                 "name": font_file.stem,
                 "file": font_file.name,
                 "type": "ttf",
-                "size_kb": round(file_size / 1024, 2),
+                "size_kb": round(font_file.stat().st_size / 1024, 2),
                 "url": f"/api/font-file/{font_file.name}",
             })
-    
+
     return {
-        "custom_fonts": sorted(available_fonts, key=lambda x: x["name"]),
-        "count": len(available_fonts)
+        "custom_fonts": available_fonts,
+        "count": len(available_fonts),
     }
 
 
 @app.get("/api/font-file/{filename}")
 def get_font_file(
     filename: str,
+    _user: AuthenticatedUser = Depends(require_authenticated_user),
 ) -> FileResponse:
-    """Serve a custom font file so the frontend can load it with @font-face."""
+    """Serve a platform font file so the frontend can load it via @font-face."""
     fonts_dir = ROOT_DIR / "assets" / "fonts"
     safe_filename = Path(filename).name
     font_path = fonts_dir / safe_filename
@@ -857,119 +781,44 @@ def get_font_file(
     )
 
 
-@app.post("/api/upload-font")
-def upload_font(
-    font_file: UploadFile = File(...),
-    _user: AuthenticatedUser = Depends(require_authenticated_user),
-) -> dict[str, Any]:
-    """Upload a custom TrueType font file (.ttf) to the fonts directory."""
-    fonts_dir = ROOT_DIR / "assets" / "fonts"
-    fonts_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Validate file extension
-    filename = font_file.filename or "unknown.ttf"
-    file_ext = filename.lower().split(".")[-1]
-    
-    if file_ext != "ttf":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid file type '.{file_ext}'. Only .ttf fonts are supported for PDF generation. "
-                "Please upload a TrueType (.ttf) font."
-            ),
-        )
-    
-    # Sanitize filename (remove any path components and special chars)
-    safe_filename = Path(filename).name
-    safe_filename = "".join(c for c in safe_filename if c.isalnum() or c in ".-_ ")
-    if not safe_filename or safe_filename.startswith("."):
-        raise HTTPException(status_code=400, detail="Invalid font filename.")
-    
-    target_path = fonts_dir / safe_filename
-    
-    # Check if file already exists
-    if target_path.exists():
-        raise HTTPException(
-            status_code=409,
-            detail=f"Font file '{safe_filename}' already exists. Delete it first or rename your file."
-        )
-    
-    # Write the uploaded file
-    try:
-        file_size = stream_upload_to_path(
-            font_file,
-            target_path,
-            max_bytes=MAX_FONT_UPLOAD_BYTES,
-        )
-
-        # Ensure the uploaded file is a real TrueType font that ReportLab can parse.
-        try:
-            TTFont(target_path.stem, str(target_path))
-        except Exception as exc:
-            target_path.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Uploaded file is not a valid TrueType (.ttf) font ReportLab can render. "
-                    f"Details: {exc}"
-                ),
-            ) from exc
-        
-        return {
-            "message": "Font uploaded successfully",
-            "filename": safe_filename,
-            "font_name": target_path.stem,
-            "size_kb": round(file_size / 1024, 2),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        if target_path.exists():
-            safe_unlink(target_path)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to upload font: {exc}",
-        ) from exc
-    finally:
-        font_file.file.close()
+class FontRequestPayload(BaseModel):
+    font_name: str
 
 
-@app.delete("/api/delete-font/{filename}")
-def delete_font(
-    filename: str,
-    _user: AuthenticatedUser = Depends(require_authenticated_user),
+@app.post("/api/request-font")
+def request_font(
+    payload: FontRequestPayload,
+    user: AuthenticatedUser = Depends(require_authenticated_user),
 ) -> dict[str, str]:
-    """Delete a custom font file from the fonts directory."""
-    fonts_dir = ROOT_DIR / "assets" / "fonts"
-    
-    # Sanitize filename
-    safe_filename = Path(filename).name
-    font_path = fonts_dir / safe_filename
-    
-    if not font_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Font file '{safe_filename}' not found."
+    """Record a user's request for a font to be added to the platform library."""
+    import time as _time
+
+    font_name = payload.font_name.strip()
+    if not font_name:
+        raise HTTPException(status_code=400, detail="font_name must not be empty.")
+    if len(font_name) > 128:
+        raise HTTPException(status_code=400, detail="font_name is too long (max 128 characters).")
+
+    with _font_requests_lock:
+        requests = _load_font_requests()
+        # Deduplicate: one pending request per (user, font_name) pair.
+        already_requested = any(
+            r.get("font_name", "").lower() == font_name.lower() and r.get("user_sub") == user.sub
+            for r in requests
         )
-    
-    # Only allow deleting supported font files.
-    if font_path.suffix.lower() != ".ttf":
-        raise HTTPException(
-            status_code=400,
-            detail="Can only delete .ttf font files."
-        )
-    
-    try:
-        font_path.unlink()
-        return {
-            "message": f"Font '{safe_filename}' deleted successfully.",
-            "filename": safe_filename
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete font: {exc}",
-        ) from exc
+        if already_requested:
+            return {"message": f"You have already requested \"{font_name}\". We'll add it soon!"}
+
+        requests.append({
+            "font_name": font_name,
+            "user_sub": user.sub,
+            "user_email": user.email,
+            "requested_at": int(_time.time()),
+            "status": "pending",
+        })
+        _save_font_requests(requests)
+
+    return {"message": f"Request for \"{font_name}\" submitted! The admin will review it shortly."}
 
 
 if FRONTEND_DIST.exists():

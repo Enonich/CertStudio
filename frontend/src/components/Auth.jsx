@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useId, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 
 const NAMES = ['Alexandra Reed','James Okonkwo','Mei Lin Zhang','Samuel Torres','Priya Nair','Oliver Bennett'];
@@ -38,13 +38,15 @@ function pwStrength(val) {
 
 export default function Auth() {
   const { signIn, signUp } = useAuth();
+  const emailInputId = useId();
+  const passwordInputId = useId();
+  const confirmPasswordInputId = useId();
 
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -108,7 +110,7 @@ export default function Auth() {
         </div>
 
         {/* Floating cert cards — spread across full page */}
-        <div className="ap-float-bg">
+        <div className="ap-float-bg" aria-hidden="true">
           {FLOAT_CARDS.map(({ cls, pre, title, name }) => (
             <div key={cls} className={`ap-fc ap-fc-${cls}`}>
               <div className="ap-fc-inner">
@@ -169,35 +171,41 @@ export default function Auth() {
 
           <div className="ap-form-container">
             {/* Mode toggle */}
-            <div className="ap-mode-toggle">
-              <button className={`ap-mode-btn${!isSignup ? ' active' : ''}`} onClick={() => switchMode('login')}>Sign in</button>
-              <button className={`ap-mode-btn${isSignup ? ' active' : ''}`} onClick={() => switchMode('signup')}>Create account</button>
+            <div className="ap-mode-toggle" aria-label="Authentication mode">
+              <button type="button" className={`ap-mode-btn${!isSignup ? ' active' : ''}`} aria-pressed={!isSignup} onClick={() => switchMode('login')}>Sign in</button>
+              <button type="button" className={`ap-mode-btn${isSignup ? ' active' : ''}`} aria-pressed={isSignup} onClick={() => switchMode('signup')}>Create account</button>
             </div>
 
             <div className="ap-eyebrow">{isSignup ? 'Get started free' : 'Welcome back'}</div>
             <div className="ap-form-title">{isSignup ? <>Create your<br/>account</> : <>Sign in to<br/>CertStudio</>}</div>
             <div className="ap-form-sub">{isSignup ? 'Build and send beautiful certificates to your recipients.' : 'Design and generate professional certificates in minutes.'}</div>
 
-            {error   && <div className="ap-alert ap-alert-err">{error}</div>}
-            {message && <div className="ap-alert ap-alert-ok">{message}</div>}
+            {error && <div className="ap-alert ap-alert-err" role="alert">{error}</div>}
+            {message && <div className="ap-alert ap-alert-ok" role="status" aria-live="polite">{message}</div>}
 
             <form onSubmit={handleSubmit}>
               {/* Email */}
               <div className="ap-field">
-                <label className="ap-field-lbl">Email address</label>
+                <label className="ap-field-lbl" htmlFor={emailInputId}>Email address</label>
                 <div className="ap-field-wrap">
-                  <input className="ap-input" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} />
+                  <input id={emailInputId} className="ap-input" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} autoFocus />
                   <svg className="ap-field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 7 10-7"/></svg>
                 </div>
               </div>
 
               {/* Password */}
               <div className="ap-field">
-                <label className="ap-field-lbl">Password</label>
+                <label className="ap-field-lbl" htmlFor={passwordInputId}>Password</label>
                 <div className="ap-field-wrap">
-                  <input className="ap-input ap-input-pw" type={showPassword ? 'text' : 'password'} required autoComplete={isSignup ? 'new-password' : 'current-password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} />
+                  <input id={passwordInputId} className="ap-input ap-input-pw" type={showPassword ? 'text' : 'password'} required autoComplete={isSignup ? 'new-password' : 'current-password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} />
                   <svg className="ap-field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-                  <button type="button" className="ap-pw-toggle" tabIndex={-1} onClick={() => setShowPassword(v => !v)}>
+                  <button
+                    type="button"
+                    className="ap-pw-toggle"
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    onClick={() => setShowPassword(v => !v)}
+                  >
                     {showPassword
                       ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24M1 1l22 22"/></svg>
                       : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -217,22 +225,21 @@ export default function Auth() {
               {/* Confirm password (signup only) */}
               {isSignup && (
                 <div className="ap-field">
-                  <label className="ap-field-lbl">Confirm password</label>
+                  <label className="ap-field-lbl" htmlFor={confirmPasswordInputId}>Confirm password</label>
                   <div className="ap-field-wrap">
-                    <input className={`ap-input ap-input-pw${confirmPassword && confirmPassword !== password ? ' ap-input-err' : ''}`} type={showPassword ? 'text' : 'password'} required autoComplete="new-password" placeholder="Repeat your password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} />
+                    <input id={confirmPasswordInputId} className={`ap-input ap-input-pw${confirmPassword && confirmPassword !== password ? ' ap-input-err' : ''}`} type={showPassword ? 'text' : 'password'} required autoComplete="new-password" placeholder="Repeat your password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} />
                     <svg className="ap-field-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
                   </div>
                 </div>
               )}
 
-              {/* Options row (login only) */}
+              {/* Login persistence note */}
               {!isSignup && (
                 <div className="ap-options-row">
-                  <label className="ap-remember" onClick={() => setRememberMe(v => !v)}>
-                    <div className={`ap-check${rememberMe ? ' on' : ''}`} />
-                    Remember me
-                  </label>
-                  <a href="#" className="ap-forgot">Forgot password?</a>
+                  <div className="ap-session-note">
+                    <span className="ap-session-note-dot" aria-hidden="true" />
+                    Sessions stay signed in on this device.
+                  </div>
                 </div>
               )}
 
@@ -246,13 +253,13 @@ export default function Auth() {
             {/* Footer */}
             <div className="ap-footer">
               {isSignup
-                ? <>Already have an account? <button className="ap-link-btn" onClick={() => switchMode('login')}>Sign in</button></>
-                : <>Don't have an account? <button className="ap-link-btn" onClick={() => switchMode('signup')}>Create one free</button></>
+                ? <>Already have an account? <button type="button" className="ap-link-btn" onClick={() => switchMode('login')}>Sign in</button></>
+                : <>Don't have an account? <button type="button" className="ap-link-btn" onClick={() => switchMode('signup')}>Create one free</button></>
               }
             </div>
 
             <div className="ap-terms">
-              By continuing, you agree to our <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>
+              Use CertStudio only in line with your organisation's privacy and data-handling requirements.
             </div>
           </div>
         </div>
@@ -339,7 +346,7 @@ const CSS = `
 /* Social proof — bottom right */
 .ap-social { position:absolute; bottom:28px; right:32px; text-align:right; animation:apFadeUp 1s 1.1s both; z-index:2; }
 .ap-sp-num  { font-family:'Playfair Display',serif; font-size:26px; color:rgba(255,255,255,0.75); line-height:1; }
-.ap-sp-lbl  { font-size:10px; color:rgba(255,255,255,0.3); letter-spacing:0.5px; margin-top:3px; }
+.ap-sp-lbl  { font-size:10px; color:rgba(255,255,255,0.46); letter-spacing:0.5px; margin-top:3px; }
 
 /* ── CENTERED FORM CARD ── */
 .ap-card {
@@ -386,6 +393,7 @@ const CSS = `
 .ap-mode-toggle { display:flex; background:#f0eadb; border-radius:10px; padding:3px; margin-bottom:32px; border:1px solid rgba(184,137,42,0.15); }
 .ap-mode-btn { flex:1; height:34px; border:none; border-radius:8px; cursor:pointer; font-family:'Lato',sans-serif; font-size:13px; font-weight:700; letter-spacing:0.3px; transition:all 0.2s; background:none; color:rgba(26,18,8,0.3); }
 .ap-mode-btn.active { background:#fdfaf4; color:#1a1208; box-shadow:0 1px 6px rgba(0,0,0,0.1),0 0 0 1px rgba(184,137,42,0.2); }
+.ap-mode-btn:focus-visible { outline:2px solid rgba(184,137,42,0.55); outline-offset:2px; }
 
 /* Headings */
 .ap-eyebrow { font-size:10px; letter-spacing:2.5px; text-transform:uppercase; color:#b8892a; font-weight:700; margin-bottom:6px; }
@@ -409,15 +417,16 @@ const CSS = `
   transition:all 0.2s; caret-color:#b8892a;
 }
 .ap-input:focus { border-color:rgba(184,137,42,0.5); background:#fffdf7; box-shadow:0 0 0 3px rgba(184,137,42,0.1); }
-.ap-input::placeholder { color:rgba(26,18,8,0.25); }
+.ap-input::placeholder { color:rgba(26,18,8,0.42); }
 .ap-input.ap-input-err { border-color:#c0392b; background:#fff8f8; box-shadow:0 0 0 3px rgba(192,57,43,0.08); }
 .ap-input-pw { padding-right:40px; }
-.ap-field-icon { position:absolute; left:13px; top:50%; transform:translateY(-50%); color:rgba(26,18,8,0.25); pointer-events:none; transition:color 0.2s; }
+.ap-field-icon { position:absolute; left:13px; top:50%; transform:translateY(-50%); color:rgba(26,18,8,0.38); pointer-events:none; transition:color 0.2s; }
 .ap-field-wrap:focus-within .ap-field-icon { color:#b8892a; }
 
 /* Password toggle */
-.ap-pw-toggle { position:absolute; right:12px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; color:rgba(26,18,8,0.3); padding:4px; transition:color 0.15s; }
+.ap-pw-toggle { position:absolute; right:12px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; color:rgba(26,18,8,0.45); padding:4px; transition:color 0.15s; }
 .ap-pw-toggle:hover { color:#1a1208; }
+.ap-pw-toggle:focus-visible { outline:2px solid rgba(184,137,42,0.55); outline-offset:2px; border-radius:6px; }
 
 /* Password strength */
 .ap-pw-bars { display:flex; gap:4px; margin-top:6px; }
@@ -428,13 +437,9 @@ const CSS = `
 .ap-pw-lbl { font-size:10px; color:rgba(26,18,8,0.3); margin-top:3px; }
 
 /* Options row */
-.ap-options-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; margin-top:4px; }
-.ap-remember { display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; color:rgba(26,18,8,0.6); user-select:none; }
-.ap-check { width:16px; height:16px; border-radius:4px; background:#f8f4ec; border:1.5px solid rgba(26,18,8,0.2); display:flex; align-items:center; justify-content:center; transition:all 0.15s; flex-shrink:0; }
-.ap-check.on { background:#b8892a; border-color:#b8892a; }
-.ap-check.on::after { content:''; width:8px; height:5px; border:2px solid #fff; border-top:none; border-right:none; transform:rotate(-45deg) translateY(-1px); display:block; }
-.ap-forgot { font-size:12px; color:#b8892a; font-weight:700; text-decoration:none; border-bottom:1px solid transparent; transition:border-color 0.15s; }
-.ap-forgot:hover { border-bottom-color:#b8892a; }
+.ap-options-row { display:flex; align-items:center; justify-content:flex-start; margin-bottom:20px; margin-top:6px; }
+.ap-session-note { display:flex; align-items:center; gap:8px; font-size:12px; color:rgba(26,18,8,0.62); }
+.ap-session-note-dot { width:8px; height:8px; border-radius:50%; background:linear-gradient(135deg,#d4a84b 0%,#8a5e14 100%); box-shadow:0 0 0 3px rgba(184,137,42,0.12); flex-shrink:0; }
 
 /* Submit button */
 .ap-submit {
@@ -453,13 +458,14 @@ const CSS = `
 .ap-submit:hover::before { transform:translateX(100%); }
 .ap-submit:active { transform:translateY(0); }
 .ap-submit:disabled { opacity:0.7; pointer-events:none; }
+.ap-submit:focus-visible { outline:2px solid rgba(184,137,42,0.55); outline-offset:3px; }
 
 /* Footer */
-.ap-footer { text-align:center; margin-top:20px; font-size:12px; color:rgba(26,18,8,0.3); }
+.ap-footer { text-align:center; margin-top:20px; font-size:12px; color:rgba(26,18,8,0.46); }
 .ap-link-btn { background:none; border:none; color:#b8892a; font-weight:700; cursor:pointer; font-size:12px; font-family:'Lato',sans-serif; padding:0; text-decoration:none; }
 .ap-link-btn:hover { text-decoration:underline; }
-.ap-terms { margin-top:16px; font-size:10.5px; color:rgba(26,18,8,0.25); text-align:center; line-height:1.5; }
-.ap-terms a { color:rgba(26,18,8,0.4); }
+.ap-link-btn:focus-visible { outline:2px solid rgba(184,137,42,0.55); outline-offset:3px; border-radius:4px; }
+.ap-terms { margin-top:16px; font-size:10.5px; color:rgba(26,18,8,0.52); text-align:center; line-height:1.5; }
 
 /* ── Row: left showcase + form card ── */
 .ap-center-col {
@@ -508,4 +514,138 @@ const CSS = `
 }
 .ap-feat-tag:hover { border-color:rgba(255,255,255,0.18); color:rgba(255,255,255,0.65); }
 .ap-feat-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+
+@media (max-width: 1080px) {
+  .ap-page {
+    overflow-y: auto;
+    align-items: flex-start;
+    padding: 28px 20px 40px;
+  }
+
+  .ap-center-col {
+    width: 100%;
+    max-width: 920px;
+    gap: 32px;
+    margin: 0 auto;
+    padding-top: 30px;
+  }
+
+  .ap-left-showcase {
+    max-width: 180px;
+  }
+
+  .ap-fc-c3,
+  .ap-fc-c5 {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .ap-page {
+    height: auto;
+    min-height: 100svh;
+    padding: 18px 16px 28px;
+  }
+
+  .ap-center-col {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    max-width: 480px;
+    gap: 18px;
+    padding-top: 18px;
+  }
+
+  .ap-card {
+    width: 100%;
+    max-width: none;
+    max-height: none;
+  }
+
+  .ap-left-showcase {
+    order: 2;
+    align-items: center;
+    text-align: center;
+    max-width: none;
+    gap: 14px;
+  }
+
+  .ap-features {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .ap-feat-tag {
+    justify-content: center;
+  }
+
+  .ap-brand,
+  .ap-social,
+  .ap-float-bg {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .ap-page {
+    padding: 12px;
+  }
+
+  .ap-card {
+    padding: 26px 20px 22px;
+    border-radius: 16px;
+  }
+
+  .ap-card-logo {
+    margin-bottom: 22px;
+  }
+
+  .ap-mode-toggle {
+    margin-bottom: 24px;
+  }
+
+  .ap-form-title {
+    font-size: 26px;
+  }
+
+  .ap-form-sub {
+    margin-bottom: 22px;
+  }
+
+  .ap-corner {
+    display: none;
+  }
+
+  .ap-tw-name {
+    font-size: 16px;
+  }
+
+  .ap-options-row {
+    margin-bottom: 16px;
+  }
+
+  .ap-submit {
+    height: 42px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ap-fc,
+  .ap-brand,
+  .ap-social,
+  .ap-card,
+  .ap-form-container,
+  .ap-left-showcase,
+  .ap-features {
+    animation: none !important;
+  }
+
+  .ap-submit::before,
+  .ap-tw-cursor {
+    animation: none !important;
+    transition: none !important;
+  }
+}
 `;

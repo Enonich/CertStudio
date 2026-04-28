@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { getSupabaseClient, initializeSupabaseClient } from '../lib/supabase';
 
 const AuthContext = createContext(null);
+const AUTH_LOADING_FALLBACK_MS = 1500;
 
 /**
  * Provides Supabase auth state and helpers to the entire React tree.
@@ -24,8 +25,9 @@ export function AuthProvider({ children }) {
     };
 
     fallbackTimer = setTimeout(() => {
+      if (!active) return;
       setSession((prev) => (prev === undefined ? null : prev));
-    }, 4000);
+    }, AUTH_LOADING_FALLBACK_MS);
 
     (async () => {
       try {
@@ -56,9 +58,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const getReadyClient = async () => {
-    if (!clientRef.current) {
-      clientRef.current = await initializeSupabaseClient();
-    }
+    clientRef.current = await initializeSupabaseClient();
     return clientRef.current;
   };
 

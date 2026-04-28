@@ -1,32 +1,29 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { apiFetch } from "../lib/apiFetch";
 import { openPdfForPrinting } from "../lib/printHandler";
 import { formatErrorDetail } from "../lib/errorUtils";
 import { getFilenameFromContentDisposition } from "../lib/fileUtils";
 import { MAX_PREVIEW_CERTIFICATES } from "../constants/editorConstants";
+import { useEditorStore } from "../store/useEditorStore";
 
 /**
  * Manages PDF generation, printing, preview, and download state and operations.
+ * Reads editor state from the Zustand store.
  */
 export function useGenerate({
-  templateFile,
-  fields,
-  fieldMappings,
-  csvFile,
-  useCsv,
-  csvRowCount,
-  csvFirstRow,
-  csvAllRows,
-  generateOptions,
   buildPayload,
   buildDataPayload,
   getFieldValuePayload,
   setStatus,
-  setPanelState,
   canPrintFromCsv,
-  isGenerating,
-  setIsGenerating,
 }) {
+  const {
+    templateFile, fields, fieldMappings,
+    csvFile, useCsv, csvRowCount, csvFirstRow, csvAllRows,
+    generateOptions,
+    isGenerating, setIsGenerating,
+    setPanelState,
+  } = useEditorStore();
   const [isPreviewingAll, setIsPreviewingAll] = useState(false);
   const [generatedCertificates, setGeneratedCertificates] = useState([]);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
@@ -34,7 +31,18 @@ export function useGenerate({
   const [latestDownload, setLatestDownload] = useState(null);
   const [zipNameModal, setZipNameModal] = useState({ open: false, suggestedName: 'certificates' });
 
+  // Abort controller for cancelling in-flight batch preview requests.
+  const previewAbortRef = useRef(null);
+  // Ref-based lock to prevent rapid double-clicks before React re-renders.
+  const generateLockRef = useRef(false);
+
+  /** Revoke all blob URLs and clean up preview state. */
   const closePreview = () => {
+    // Abort any in-flight batch preview generation.
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+      previewAbortRef.current = null;
+    }
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
     // Revoke any blob URLs stored from batch preview to avoid memory leaks
@@ -92,7 +100,8 @@ export function useGenerate({
   // ---- generatePdf ---------------------------------------------------------
 
   const generatePdf = async () => {
-    if (isGenerating) return;
+    if (isGenerating || generateLockRef.current) return;
+    generateLockRef.current = true;
     try {
       setIsGenerating(true);
 
@@ -163,7 +172,10 @@ export function useGenerate({
         const filename = getFilenameFromContentDisposition(contentDisposition, 'certificates.zip');
         if (latestDownload?.url) URL.revokeObjectURL(latestDownload.url);
         setLatestDownload({ url: zipUrl, filename, kind: 'zip' });
-        setStatus(`Successfully generated ${recipientCount} certificates. Click Download to save the ZIP file.`);
+        // Auto-open the ZIP name modal so the user can download immediately
+        const suggested = (filename || 'certificates.zip').replace(/\.zip$/i, '');
+        setZipNameModal({ open: true, suggestedName: suggested });
+        setStatus(`Successfully generated ${recipientCount} certificates.`);
         return;
       }
 
@@ -182,18 +194,20 @@ export function useGenerate({
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(URL.createObjectURL(blob));
       setPanelState((prev) => ({ ...prev, preview: true }));
-      setStatus('Certificate generated successfully. Use Download to save it.');
+      setStatus('Certificate generated. Preview is ready — use the ▾ menu to download.');
     } catch (error) {
       setStatus(`Generation failed unexpectedly: ${error?.message || error}`);
     } finally {
       setIsGenerating(false);
+      generateLockRef.current = false;
     }
   };
 
   // ---- printCurrentCertificate ---------------------------------------------
 
   const printCurrentCertificate = async () => {
-    if (isGenerating) return;
+    if (isGenerating || generateLockRef.current) return;
+    generateLockRef.current = true;
     if (!templateFile) { setStatus('Please open a certificate template first.'); return; }
 
     const rowIndex = Number(generateOptions.row) || 0;
@@ -251,6 +265,7 @@ export function useGenerate({
       setStatus(`Printing failed unexpectedly: ${error?.message || error}`);
     } finally {
       setIsGenerating(false);
+      generateLockRef.current = false;
     }
   };
 
@@ -268,6 +283,11 @@ export function useGenerate({
       return;
     }
 
+    // Cancel any previous in-flight preview run.
+    if (previewAbortRef.current) previewAbortRef.current.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+
     try {
       setIsPreviewingAll(true);
       setStatus('Generating certificates for preview…');
@@ -279,11 +299,22 @@ export function useGenerate({
       const certs = [];
 
       for (let rowIndex = 0; rowIndex < csvRowCount; rowIndex++) {
+        // Check if the operation was cancelled before each request.
+        if (controller.signal.aborted) {
+          // Revoke URLs for any certs generated so far.
+          certs.forEach((cert) => { if (cert.url) URL.revokeObjectURL(cert.url); });
+          return;
+        }
+
         const formData = buildGenerateFormData({ row: rowIndex, overlayOnly, batch: false });
         if (!formData) continue;
 
         try {
-          const response = await apiFetch('/api/generate-file-upload', { method: 'POST', body: formData });
+          const response = await apiFetch('/api/generate-file-upload', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal,
+          });
           if (!response.ok) { console.warn(`Failed to generate certificate for row ${rowIndex + 1}`); continue; }
           const ct = response.headers.get('content-type') || '';
           if (!ct.includes('application/pdf')) { console.warn(`Unexpected type for row ${rowIndex + 1}: ${ct}`); continue; }
@@ -309,9 +340,21 @@ export function useGenerate({
             name: `Certificate_${rowIndex + 1}.pdf`,
             details: { Row: rowIndex + 1, Total: csvRowCount },
           });
+
+          // Progress feedback
+          setStatus(`Generating certificates for preview… ${certs.length}/${csvRowCount}`);
         } catch (error) {
+          if (error?.name === 'AbortError') {
+            certs.forEach((cert) => { if (cert.url) URL.revokeObjectURL(cert.url); });
+            return;
+          }
           console.warn(`Error generating certificate for row ${rowIndex + 1}:`, error);
         }
+      }
+
+      if (controller.signal.aborted) {
+        certs.forEach((cert) => { if (cert.url) URL.revokeObjectURL(cert.url); });
+        return;
       }
 
       if (certs.length === 0) { setStatus('Failed to generate any certificates.'); return; }
@@ -321,9 +364,11 @@ export function useGenerate({
       setPreviewModalOpen(true);
       setStatus(`Generated ${certs.length} certificates. Click below to preview and print.`);
     } catch (error) {
+      if (error?.name === 'AbortError') return;
       setStatus(`Failed to generate certificates: ${error?.message || error}`);
     } finally {
       setIsPreviewingAll(false);
+      if (previewAbortRef.current === controller) previewAbortRef.current = null;
     }
   };
 
